@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -7,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
@@ -24,9 +25,25 @@ MAX_LOSS_PCT = 0.002
 MAX_TRADE_TIME = 60
 FLOW_STOP_THRESHOLD = 0.35
 
-PATTERN_EXPIRY = 3600  # 1 hora
 PATTERN_MIN_TRADES = 8
 PATTERN_BUCKET_STEP = 0.2
+PATTERN_RECENCY_DAYS = 10
+PATTERN_RECENCY_SECONDS = PATTERN_RECENCY_DAYS * 86400
+PATTERN_STATS_REFRESH = 30
+
+HISTORY_LOOKBACK_DAYS = 30
+HISTORY_LOOKBACK_SECONDS = HISTORY_LOOKBACK_DAYS * 86400
+TIME_BUCKET_SECONDS = 3600
+
+ANALYSIS_INTERVAL_MULTIPLIER = 6.0
+MIN_ANALYSIS_INTERVAL = 0.5
+MAX_ANALYSIS_INTERVAL = 10.0
+DEFAULT_ANALYSIS_INTERVAL = 2.0
+ANALYSIS_HISTORY_MAX_ENTRIES = 5000
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+TRADE_HISTORY_FILE = os.path.join(DATA_DIR, "trade_history.jsonl")
+ANALYSIS_HISTORY_FILE = os.path.join(DATA_DIR, "analysis_history.jsonl")
 
 VOLATILITY_MAX = 0.01
 MOMENTUM_SCALE = 3.0
@@ -42,6 +59,7 @@ WEIGHTS = {
 }
 
 EPSILON = 1e-12
+DAY_SECONDS = 86400
 
 # ================= THREAD SAFETY =================
 lock = threading.Lock()
@@ -66,6 +84,8 @@ trades_window = deque(maxlen=WINDOW_TRADES)
 short_trades_window = deque(maxlen=SHORT_WINDOW_TRADES)
 price_window = deque(maxlen=PRICE_WINDOW)
 trade_history = []
+analysis_history = deque(maxlen=ANALYSIS_HISTORY_MAX_ENTRIES)
+last_analysis_ts = 0.0
 
 total_pnl = 0.0
 wins = 0
@@ -76,8 +96,12 @@ last_probability = 0.5
 last_components = {}
 entry_snapshot = None
 
-# ================= PADRÕES VIVOS =================
-historical_patterns = {}
+pattern_stats_cache = {
+    "bucket": None,
+    "last_trade_count": 0,
+    "last_refresh": 0.0,
+    "stats": {},
+}
 
 # ================= FUNÇÕES =================
 def clamp(value, lower, upper):
@@ -87,6 +111,216 @@ def clamp(value, lower, upper):
 def safe_div(numerator, denominator, default=0.0):
     return numerator / denominator if abs(denominator) > EPSILON else default
 
+
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def serialize_pattern_key(pattern_key):
+    if pattern_key is None:
+        return None
+    return list(pattern_key)
+
+
+def deserialize_pattern_key(raw_value):
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, tuple):
+        return raw_value
+    if isinstance(raw_value, list):
+        return tuple(int(value) for value in raw_value)
+    return None
+
+
+def load_jsonl(path):
+    if not os.path.exists(path):
+        return []
+    entries = []
+    with open(path, "r", encoding="utf-8") as handler:
+        for line in handler:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def append_jsonl(path, entry):
+    ensure_data_dir()
+    with open(path, "a", encoding="utf-8") as handler:
+        handler.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+def normalize_trade_entry(entry):
+    normalized = dict(entry)
+    normalized["pattern_key"] = deserialize_pattern_key(entry.get("pattern_key"))
+    return normalized
+
+
+def load_trade_history():
+    history = []
+    for entry in load_jsonl(TRADE_HISTORY_FILE):
+        history.append(normalize_trade_entry(entry))
+    return history
+
+
+def load_analysis_history():
+    return load_jsonl(ANALYSIS_HISTORY_FILE)
+
+
+def append_trade_history(trade):
+    payload = dict(trade)
+    payload["pattern_key"] = serialize_pattern_key(trade.get("pattern_key"))
+    append_jsonl(TRADE_HISTORY_FILE, payload)
+
+
+def append_analysis_history(entry):
+    append_jsonl(ANALYSIS_HISTORY_FILE, entry)
+
+
+def get_time_bucket(timestamp):
+    if timestamp is None:
+        return None
+    return int((timestamp % DAY_SECONDS) // TIME_BUCKET_SECONDS)
+
+
+def filter_history_by_time(trades, now, bucket):
+    min_ts = now - HISTORY_LOOKBACK_SECONDS
+    filtered = []
+    for trade in trades:
+        entry_time = trade.get("entry_time") or trade.get("timestamp") or trade.get("exit_time")
+        if entry_time is None:
+            continue
+        if entry_time < min_ts:
+            continue
+        if bucket is not None and get_time_bucket(entry_time) != bucket:
+            continue
+        filtered.append(trade)
+    return filtered
+
+
+def rebuild_pattern_stats(now):
+    bucket = get_time_bucket(now)
+    filtered = filter_history_by_time(trade_history, now, bucket)
+    stats = {}
+    for trade in filtered:
+        pattern_key = trade.get("pattern_key")
+        if pattern_key is None:
+            continue
+        entry_time = trade.get("entry_time") or trade.get("timestamp") or trade.get("exit_time")
+        if entry_time is None:
+            continue
+        pnl = trade.get("pnl", 0.0)
+        pattern = stats.get(pattern_key)
+        if pattern is None:
+            pattern = {
+                "wins": 0,
+                "losses": 0,
+                "trades_count": 0,
+                "last_seen": entry_time,
+                "recent_count": 0,
+            }
+            stats[pattern_key] = pattern
+        pattern["trades_count"] += 1
+        if pnl > 0:
+            pattern["wins"] += 1
+        else:
+            pattern["losses"] += 1
+        if entry_time > pattern["last_seen"]:
+            pattern["last_seen"] = entry_time
+        if now - entry_time <= PATTERN_RECENCY_SECONDS:
+            pattern["recent_count"] += 1
+
+    pattern_stats_cache["bucket"] = bucket
+    pattern_stats_cache["last_trade_count"] = len(trade_history)
+    pattern_stats_cache["last_refresh"] = now
+    pattern_stats_cache["stats"] = stats
+    return stats
+
+
+def get_pattern_stats(now):
+    bucket = get_time_bucket(now)
+    needs_refresh = (
+        pattern_stats_cache["bucket"] != bucket
+        or pattern_stats_cache["last_trade_count"] != len(trade_history)
+        or now - pattern_stats_cache["last_refresh"] > PATTERN_STATS_REFRESH
+    )
+    if needs_refresh:
+        return rebuild_pattern_stats(now)
+    return pattern_stats_cache["stats"]
+
+
+def estimate_trade_interval():
+    if len(trades_window) < 2:
+        return None
+    first_ts = trades_window[0].get("ts")
+    last_ts = trades_window[-1].get("ts")
+    if first_ts is None or last_ts is None or last_ts <= first_ts:
+        return None
+    return (last_ts - first_ts) / max(1, len(trades_window) - 1)
+
+
+def compute_analysis_interval():
+    avg_interval = estimate_trade_interval()
+    if avg_interval is None:
+        return DEFAULT_ANALYSIS_INTERVAL
+    interval = avg_interval * ANALYSIS_INTERVAL_MULTIPLIER
+    return clamp(interval, MIN_ANALYSIS_INTERVAL, MAX_ANALYSIS_INTERVAL)
+
+
+def record_analysis_snapshot(now, price, probability, components):
+    global last_analysis_ts
+
+    interval = compute_analysis_interval()
+    if now - last_analysis_ts < interval:
+        return
+
+    avg_interval = estimate_trade_interval()
+    trade_rate = safe_div(1.0, avg_interval, None) if avg_interval else None
+    snapshot = {
+        "symbol": SYMBOL,
+        "app_version": APP_VERSION,
+        "timestamp": now,
+        "price": price,
+        "probability": probability,
+        "confidence": components.get("confidence"),
+        "volatility": components.get("volatility"),
+        "signals": {
+            "flow": components.get("flow"),
+            "short_flow": components.get("short_flow"),
+            "momentum": components.get("momentum"),
+            "pattern": components.get("pattern"),
+        },
+        "pattern_key": serialize_pattern_key(components.get("pattern_key")),
+        "pattern_win_rate": components.get("pattern_win_rate"),
+        "analysis_interval": interval,
+        "trade_interval_avg": avg_interval,
+        "trade_rate": trade_rate,
+        "time_bucket": get_time_bucket(now),
+    }
+    analysis_history.append(snapshot)
+    append_analysis_history(snapshot)
+    last_analysis_ts = now
+
+
+def record_trade_history(trade):
+    trade_history.append(trade)
+    append_trade_history(trade)
+
+
+def initialize_history():
+    global trade_history, analysis_history, last_analysis_ts
+
+    ensure_data_dir()
+    trade_history = load_trade_history()
+    loaded_analysis = load_analysis_history()
+    analysis_history = deque(loaded_analysis, maxlen=ANALYSIS_HISTORY_MAX_ENTRIES)
+    if analysis_history:
+        last_entry = analysis_history[-1]
+        last_analysis_ts = last_entry.get("timestamp", 0.0) or 0.0
 
 def bucketize_signal(value, step):
     return int(round(value / step))
@@ -145,20 +379,36 @@ def build_pattern_key(flow_signal, short_flow_signal, momentum_signal):
     )
 
 
-def get_pattern_signal(pattern_key):
+def get_pattern_signal(pattern_key, now):
     if pattern_key is None:
-        return None, 0.0, None
-    pattern = historical_patterns.get(pattern_key)
+        return None, 0.0, None, None
+
+    stats = get_pattern_stats(now)
+    pattern = stats.get(pattern_key)
     if not pattern:
-        return None, 0.0, None
-    now = time.time()
-    if now - pattern["last_seen"] > PATTERN_EXPIRY:
-        return None, 0.0, None
+        return None, 0.0, None, None
+
+    if now - pattern["last_seen"] > PATTERN_RECENCY_SECONDS:
+        return None, 0.0, None, None
+
     trades = pattern["trades_count"]
     win_rate = safe_div(pattern["wins"], trades, 0.5)
     signal = clamp(2 * (win_rate - 0.5), -1.0, 1.0)
-    confidence = min(1.0, trades / PATTERN_MIN_TRADES)
-    return signal, confidence, win_rate
+
+    count_weight = min(1.0, trades / PATTERN_MIN_TRADES)
+    recent_weight = min(1.0, pattern["recent_count"] / PATTERN_MIN_TRADES)
+    recency_weight = clamp(
+        1.0 - safe_div(now - pattern["last_seen"], PATTERN_RECENCY_SECONDS, 1.0),
+        0.0,
+        1.0,
+    )
+    confidence = count_weight * recent_weight * recency_weight
+    meta = {
+        "trades_count": trades,
+        "recent_count": pattern["recent_count"],
+        "last_seen": pattern["last_seen"],
+    }
+    return signal, confidence, win_rate, meta
 
 
 def compute_confidence(volatility):
@@ -168,7 +418,7 @@ def compute_confidence(volatility):
     return MIN_CONFIDENCE + (1.0 - MIN_CONFIDENCE) * (1.0 - normalized)
 
 
-def compute_probability():
+def compute_probability(now):
     if len(trades_window) < MIN_LOOKBACK or len(price_window) < MIN_LOOKBACK:
         return 0.5, {"confidence": DEFAULT_CONFIDENCE}
 
@@ -177,7 +427,10 @@ def compute_probability():
     volatility = compute_volatility(price_window)
     momentum_signal = compute_momentum_signal(price_window, volatility)
     pattern_key = build_pattern_key(flow_signal, short_flow_signal, momentum_signal)
-    pattern_signal, pattern_confidence, pattern_win_rate = get_pattern_signal(pattern_key)
+    pattern_signal, pattern_confidence, pattern_win_rate, pattern_meta = get_pattern_signal(
+        pattern_key,
+        now,
+    )
 
     signals = {}
     weights = {}
@@ -203,6 +456,9 @@ def compute_probability():
             "pattern": pattern_signal,
             "pattern_key": pattern_key,
             "pattern_win_rate": pattern_win_rate,
+            "pattern_trades_count": pattern_meta.get("trades_count") if pattern_meta else None,
+            "pattern_recent_count": pattern_meta.get("recent_count") if pattern_meta else None,
+            "pattern_last_seen": pattern_meta.get("last_seen") if pattern_meta else None,
             "volatility": volatility,
             "confidence": DEFAULT_CONFIDENCE,
         }
@@ -222,35 +478,12 @@ def compute_probability():
         "pattern": pattern_signal,
         "pattern_key": pattern_key,
         "pattern_win_rate": pattern_win_rate,
+        "pattern_trades_count": pattern_meta.get("trades_count") if pattern_meta else None,
+        "pattern_recent_count": pattern_meta.get("recent_count") if pattern_meta else None,
+        "pattern_last_seen": pattern_meta.get("last_seen") if pattern_meta else None,
         "volatility": volatility,
         "confidence": confidence,
     }
-
-
-def update_patterns(trade):
-    pattern_key = trade.get("pattern_key")
-    if pattern_key is None:
-        return
-
-    now = time.time()
-    pattern = historical_patterns.get(pattern_key)
-    if pattern is None:
-        historical_patterns[pattern_key] = {
-            "wins": 1 if trade["pnl"] > 0 else 0,
-            "losses": 0 if trade["pnl"] > 0 else 1,
-            "trades_count": 1,
-            "last_seen": now,
-            "last_win_time": now if trade["pnl"] > 0 else 0,
-        }
-        return
-
-    pattern["trades_count"] += 1
-    if trade["pnl"] > 0:
-        pattern["wins"] += 1
-        pattern["last_win_time"] = now
-    else:
-        pattern["losses"] += 1
-    pattern["last_seen"] = now
 
 
 def format_signal(value):
@@ -263,18 +496,19 @@ def format_float(value, precision=4):
     return f"{value:.{precision}f}"
 
 
-def evaluate_decision(price):
+def evaluate_decision(price, timestamp):
     global state, entry_price, entry_time
     global total_pnl, wins, losses
     global equity, total_gains, total_losses
     global last_probability, last_components, entry_snapshot
 
-    now = time.time()
+    now = timestamp
 
     with lock:
-        prob, components = compute_probability()
+        prob, components = compute_probability(now)
         last_probability = prob
         last_components = components
+        record_analysis_snapshot(now, price, prob, components)
 
         if state == "FORA":
             if prob >= ENTRY_THRESHOLD:
@@ -314,7 +548,11 @@ def evaluate_decision(price):
                     total_losses += abs(pnl)
 
                 entry_components = entry_snapshot["components"] if entry_snapshot else {}
-                trade_history.append({
+                trade_entry = {
+                    "symbol": SYMBOL,
+                    "app_version": APP_VERSION,
+                    "entry_time": entry_time,
+                    "exit_time": now,
                     "entry_price": entry_price,
                     "exit_price": price,
                     "pnl": pnl,
@@ -324,24 +562,38 @@ def evaluate_decision(price):
                     "exit_prob": prob,
                     "entry_confidence": entry_components.get("confidence"),
                     "exit_confidence": components.get("confidence"),
+                    "entry_volatility": entry_components.get("volatility"),
+                    "exit_volatility": components.get("volatility"),
+                    "entry_momentum": entry_components.get("momentum"),
+                    "exit_momentum": components.get("momentum"),
+                    "entry_flow": entry_components.get("flow"),
+                    "exit_flow": components.get("flow"),
+                    "entry_short_flow": entry_components.get("short_flow"),
+                    "exit_short_flow": components.get("short_flow"),
+                    "entry_pattern_signal": entry_components.get("pattern"),
+                    "exit_pattern_signal": components.get("pattern"),
+                    "pattern_key": entry_snapshot["pattern_key"] if entry_snapshot else None,
+                    "pattern_win_rate": entry_components.get("pattern_win_rate"),
+                    "exit_pattern_win_rate": components.get("pattern_win_rate"),
+                    "pattern_trades_count": entry_components.get("pattern_trades_count"),
+                    "pattern_recent_count": entry_components.get("pattern_recent_count"),
+                    "pattern_last_seen": entry_components.get("pattern_last_seen"),
+                    "analysis_interval": compute_analysis_interval(),
+                    "time_bucket": get_time_bucket(entry_time),
+                    "exit_time_bucket": get_time_bucket(now),
                     "exit_reason": (
                         "STOP_FINANCEIRO" if stop_financeiro else
                         "STOP_FLUXO" if stop_fluxo else
                         "STOP_TEMPO" if stop_tempo else
                         "EXIT_PROB"
                     ),
-                    "pattern_key": entry_snapshot["pattern_key"] if entry_snapshot else None,
-                    "signals": {
-                        "flow": entry_components.get("flow"),
-                        "short_flow": entry_components.get("short_flow"),
-                        "momentum": entry_components.get("momentum"),
-                        "pattern": entry_components.get("pattern"),
-                    },
                     "buy_volume": buy_volume,
                     "sell_volume": sell_volume,
-                })
+                    "short_buy_volume": short_buy_volume,
+                    "short_sell_volume": short_sell_volume,
+                }
 
-                update_patterns(trade_history[-1])
+                record_trade_history(trade_entry)
 
                 state = "FORA"
                 entry_price = None
@@ -358,6 +610,10 @@ def print_status():
         volatility = last_components.get("volatility") if last_components else None
         pattern_key = last_components.get("pattern_key") if last_components else None
         pattern_win_rate = last_components.get("pattern_win_rate") if last_components else None
+        history_count = len(trade_history)
+        analysis_count = len(analysis_history)
+        analysis_interval = compute_analysis_interval()
+        current_bucket = get_time_bucket(time.time())
 
         print(f"""
 STATE: {state}
@@ -374,6 +630,8 @@ TRADES: {total_trades}
 WINS: {wins}
 LOSSES: {losses}
 WINRATE: {winrate:.2f}%
+
+HISTORY: {history_count} | ANALYSIS: {analysis_count} | INTERVAL: {analysis_interval:.2f}s | BUCKET: {current_bucket}
 
 PATRIMÔNIO: {equity:.2f} ({equity_pct:+.2f}%)
 ----------------------------------
@@ -394,6 +652,8 @@ def on_message(ws, message):
     price = float(data["p"])
     qty = float(data["q"])
     is_sell = data["m"]
+    trade_time = data.get("T") or data.get("E")
+    timestamp = trade_time / 1000 if trade_time is not None else time.time()
 
     with lock:
         last_price = price
@@ -414,8 +674,8 @@ def on_message(ws, message):
                 short_sell_volume -= old_short["qty"]
 
         side = "sell" if is_sell else "buy"
-        trades_window.append({"side": side, "qty": qty})
-        short_trades_window.append({"side": side, "qty": qty})
+        trades_window.append({"side": side, "qty": qty, "ts": timestamp})
+        short_trades_window.append({"side": side, "qty": qty, "ts": timestamp})
 
         if side == "buy":
             buy_volume += qty
@@ -424,7 +684,7 @@ def on_message(ws, message):
             sell_volume += qty
             short_sell_volume += qty
 
-    evaluate_decision(price)
+    evaluate_decision(price, timestamp)
 
 
 def on_open(ws):
@@ -454,6 +714,7 @@ def start_ws():
 
 
 # ================= START =================
+initialize_history()
 print(f"BotTrader v{APP_VERSION} iniciado para {SYMBOL}")
 threading.Thread(target=start_ws, daemon=True).start()
 threading.Thread(target=console_loop, daemon=True).start()
