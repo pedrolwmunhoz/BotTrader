@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.7] - 2026-01-21
+- Documentacao do console embutida no codigo (estilo game)
+
 ## [0.3.6] - 2026-01-21
 - Documentacao paginada no console
 
