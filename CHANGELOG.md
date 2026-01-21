@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.6] - 2026-01-21
+- Documentacao paginada no console
+
+## [0.3.5] - 2026-01-21
+- Documentacao tecnica detalhada com formulas e pesos
+
+## [0.3.4] - 2026-01-21
+- Menu com titulo em ASCII e opcoes de console
+- Modo real time e tela de documentacao no console
+- Versao exibida no final do console
+
 ## [0.3.3] - 2026-01-21
 - Status do console com boxes e secoes separadas
 

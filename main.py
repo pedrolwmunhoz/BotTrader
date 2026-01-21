@@ -8,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.6"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
@@ -64,6 +64,7 @@ DAY_SECONDS = 86400
 
 # ================= THREAD SAFETY =================
 lock = threading.Lock()
+show_realtime = threading.Event()
 
 # ================= PATRIMÔNIO =================
 INITIAL_EQUITY = 10000.0
@@ -107,6 +108,14 @@ pattern_stats_cache = {
     "last_refresh": 0.0,
     "stats": {},
 }
+
+MENU_TITLE = r"""
+ ____        _ _____              _
+| __ )  ___ | |_   _| __ __ _  __| | ___ _ __
+|  _ \ / _ \| | | || '__/ _` |/ _` |/ _ \ '__|
+| |_) | (_) | | | || | | (_| | (_| |  __/ |
+|____/ \___/|_| |_||_|  \__,_|\__,_|\___|_|
+"""
 
 # ================= FUNÇÕES =================
 def clamp(value, lower, upper):
@@ -637,6 +646,8 @@ def print_status():
         equity_leveraged_pct = ((equity_leveraged - INITIAL_EQUITY) / INITIAL_EQUITY * 100)
         net_unleveraged = equity - INITIAL_EQUITY
         net_leveraged = equity_leveraged - INITIAL_EQUITY
+        net_total = total_gains - total_losses
+        net_total_leveraged = total_gains_leveraged - total_losses_leveraged
         confidence = last_components.get("confidence") if last_components else None
         volatility = last_components.get("volatility") if last_components else None
         pattern_key = last_components.get("pattern_key") if last_components else None
@@ -665,17 +676,99 @@ TRADES: {total_trades} | ACERTOS: {wins} | ERROS: {losses} | WINRATE: {winrate:.
 GANHO % (SEM ALAV.): {equity_pct:+.2f}% | PERDAS: {total_losses:.2f} | GANHOS: {total_gains:.2f}
 GANHO % (ALAV. {LEVERAGE:.1f}x): {equity_leveraged_pct:+.2f}% | PERDAS: {total_losses_leveraged:.2f} | GANHOS: {total_gains_leveraged:.2f}
 LÍQUIDO: {net_unleveraged:+.2f} | LÍQUIDO ALAV.: {net_leveraged:+.2f}
+LÍQUIDO TOTAL: {net_total:+.2f} | LÍQUIDO TOTAL ALAV.: {net_total_leveraged:+.2f}
 {section}
 HISTORY: {history_count} | ANALYSIS: {analysis_count} | INTERVAL: {analysis_interval:.2f}s | BUCKET: {current_bucket}
 PATRIMÔNIO: {equity:.2f} | PATRIMÔNIO ALAV.: {equity_leveraged:.2f}
+VERSÃO: {APP_VERSION}
 {border}
 """)
 
 
 def console_loop():
     while True:
-        print_status()
+        if show_realtime.is_set():
+            print_status()
         time.sleep(0.5)
+
+
+def print_menu():
+    border = "=" * 78
+    print(f"""
+{border}
+{MENU_TITLE.strip()}
+{border}
+1 - Real time
+2 - Documentacao
+{border}
+""")
+
+
+def get_page_size():
+    try:
+        height = os.get_terminal_size().lines
+    except OSError:
+        height = 24
+    return max(10, height - 6)
+
+
+def paginate_text(text, title):
+    lines = text.splitlines()
+    total = len(lines)
+    if total == 0:
+        print("README vazio.")
+        input("Pressione ENTER para voltar ao menu...")
+        return
+
+    page_size = get_page_size()
+    index = 0
+    border = "=" * 78
+
+    while True:
+        end = min(total, index + page_size)
+        print(f"\n{border}\n{title} ({index + 1}-{end} de {total})\n{border}")
+        for line in lines[index:end]:
+            print(line)
+        print(border)
+
+        prompt = "N=proxima, P=anterior, Q=sair: "
+        choice = input(prompt).strip().lower()
+        if choice in ("q", "s", "sair", "exit"):
+            break
+        if choice in ("p", "prev", "anterior"):
+            index = max(0, index - page_size)
+            continue
+        if choice in ("n", "next", "proxima", "próxima", ""):
+            if end >= total:
+                break
+            index = end
+
+
+def show_documentation():
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "README.md"), "r", encoding="utf-8") as handler:
+            content = handler.read()
+    except OSError as exc:
+        print(f"Falha ao ler README: {exc}")
+        input("Pressione ENTER para voltar ao menu...")
+        return
+
+    paginate_text(content, "DOCUMENTACAO - README")
+
+
+def menu_loop():
+    while True:
+        print_menu()
+        choice = input("Escolha uma opcao: ").strip().lower()
+        if choice in ("1", "real time", "realtime"):
+            show_realtime.set()
+            input("Real time ativo. ENTER para voltar ao menu...")
+            show_realtime.clear()
+        elif choice in ("2", "documentacao", "documentação"):
+            show_realtime.clear()
+            show_documentation()
+        else:
+            print("Opcao invalida. Use 1 ou 2.")
 
 # ================= WEBSOCKET =================
 def on_message(ws, message):
@@ -753,5 +846,4 @@ print(f"BotTrader v{APP_VERSION} iniciado para {SYMBOL}")
 threading.Thread(target=start_ws, daemon=True).start()
 threading.Thread(target=console_loop, daemon=True).start()
 
-while True:
-    time.sleep(1)
+menu_loop()
