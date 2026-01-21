@@ -8,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
@@ -53,10 +53,10 @@ MIN_CONFIDENCE = 0.35
 DEFAULT_CONFIDENCE = 0.75
 
 WEIGHTS = {
-    "flow": 0.35,
-    "short_flow": 0.20,
-    "momentum": 0.25,
-    "pattern": 0.20,
+    "flow": 0.45,
+    "short_flow": 0.30,
+    "momentum": 0.15,
+    "pattern": 0.10,
 }
 
 EPSILON = 1e-12

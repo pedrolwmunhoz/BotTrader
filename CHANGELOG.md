@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.2] - 2026-01-21
+- Aumento do peso dos sinais de trades do WebSocket
+
 ## [0.3.1] - 2026-01-21
 - Patrimonio baseado em retorno percentual sem alavancagem
 - Totais e liquido com alavancagem configuravel
