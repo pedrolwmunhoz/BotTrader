@@ -8,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
@@ -645,31 +645,30 @@ def print_status():
         analysis_count = len(analysis_history)
         analysis_interval = compute_analysis_interval()
         current_bucket = get_time_bucket(time.time())
+        border = "=" * 78
+        section = "-" * 78
 
         print(f"""
-STATE: {state}
-PRICE: {last_price:.2f}
-
+{border}
+BOTTRADER STATUS
+{border}
+STATE: {state} | PRICE: {last_price:.2f}
+{section}
 PROB: {last_probability:.2f} | CONF: {format_float(confidence, 2)} | VOL: {format_float(volatility, 5)}
 SIGNALS: FLOW={format_signal(last_components.get("flow") if last_components else None)} SHORT={format_signal(last_components.get("short_flow") if last_components else None)} MOM={format_signal(last_components.get("momentum") if last_components else None)} PAT={format_signal(last_components.get("pattern") if last_components else None)}
 PATTERN: {pattern_key if pattern_key is not None else "n/a"} | WR: {format_float(pattern_win_rate, 2)}
-
+{section}
 BUY VOL:  {buy_volume:.4f} | SHORT: {short_buy_volume:.4f}
 SELL VOL: {sell_volume:.4f} | SHORT: {short_sell_volume:.4f}
-
-TRADES: {total_trades}
-ACERTOS: {wins}
-ERROS: {losses}
-WINRATE: {winrate:.2f}%
-
+{section}
+TRADES: {total_trades} | ACERTOS: {wins} | ERROS: {losses} | WINRATE: {winrate:.2f}%
 GANHO % (SEM ALAV.): {equity_pct:+.2f}% | PERDAS: {total_losses:.2f} | GANHOS: {total_gains:.2f}
 GANHO % (ALAV. {LEVERAGE:.1f}x): {equity_leveraged_pct:+.2f}% | PERDAS: {total_losses_leveraged:.2f} | GANHOS: {total_gains_leveraged:.2f}
 LÍQUIDO: {net_unleveraged:+.2f} | LÍQUIDO ALAV.: {net_leveraged:+.2f}
-
+{section}
 HISTORY: {history_count} | ANALYSIS: {analysis_count} | INTERVAL: {analysis_interval:.2f}s | BUCKET: {current_bucket}
-
 PATRIMÔNIO: {equity:.2f} | PATRIMÔNIO ALAV.: {equity_leveraged:.2f}
-----------------------------------
+{border}
 """)
 
 
