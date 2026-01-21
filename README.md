@@ -17,23 +17,28 @@ O **BotTrader** é um sistema de trading automatizado para criptomoedas que oper
 - Deixa os lucros correrem enquanto o mercado está favorável
 - Só sai quando as condições mudam (não quando atinge um lucro fixo)
 
-**Quais condições?** Tudo é baseado em **probabilidade**. O sistema monitora continuamente a probabilidade de sucesso do trade e sai automaticamente quando uma das seguintes condições é atendida:
+**Quais condições?** O sistema trabalha com **3 estados de fluxo** e **só sai com prova de reversão**, não no primeiro tick contra.
 
-1. **EXIT_THRESHOLD (45%)** - Quando a probabilidade cai para 45% ou menos, significa que as condições de mercado mudaram e não vale mais a pena continuar no trade. O sistema sai para proteger o capital e evitar perdas maiores.
+1. **Estados de Fluxo (TREND / HOLD / EXIT)**
+   - **TREND:** prob ≥ 65% → segura
+   - **HOLD:** 45% ≤ prob < 65% → mantém a mão (zona de ruído/absorção)
+   - **EXIT:** prob < 45% → só sai se houver prova
 
-   **Como é calculado:** A cada novo trade recebido, o sistema recalcula a probabilidade atual (`prob`) através da função `compute_probability()`, que combina os sinais de flow (45%), short_flow (30%), momentum (15%) e pattern (10%). Se `prob <= 0.45`, o sistema sai do trade.
+2. **Reversão Confirmada (mín. 2 sinais)**
+   - Falha em fazer novo high (pullback com momentum ≤ 0)
+   - Delta acumulado negativo + agressão compradora fraca
+   - Absorção no lado vendedor (volume alto com preço travado)
+   - Volume crescendo contra o preço
 
-2. **FLOW_STOP_THRESHOLD (35%)** - Quando a probabilidade cai para 35% ou menos, é um sinal forte de reversão de tendência. O sistema sai imediatamente, pois indica que o fluxo de ordens mudou drasticamente e o trade não está mais favorável.
+3. **FLOW_STOP_THRESHOLD (35%)** - Quando a probabilidade cai para 35% ou menos **e** a reversão está confirmada, o sistema sai como sinal forte de mudança de fluxo.
 
-   **Como é calculado:** Mesma lógica do EXIT_THRESHOLD, mas com threshold mais baixo. Se `prob <= 0.35`, o sistema sai imediatamente, indicando uma reversão forte de tendência.
-
-3. **MAX_LOSS_PCT (0.2%)** - Stop loss financeiro. Se o trade atingir uma perda de 0.2% do capital investido, o sistema sai automaticamente para proteger o capital, independente da probabilidade.
+4. **MAX_LOSS_PCT (0.2%)** - Stop loss financeiro. Se o trade atingir uma perda de 0.2% do capital investido, o sistema sai automaticamente para proteger o capital, independente da probabilidade.
 
    **Como é calculado:** A cada novo preço recebido, o sistema calcula o retorno do trade: `pnl_return = (price - entry_price) / entry_price`. Se `pnl_return <= -0.002` (ou seja, perda de 0.2% ou mais), o sistema sai imediatamente, independente da probabilidade atual.
 
-4. **MAX_TRADE_TIME (60 segundos)** - Se o trade durar mais de 60 segundos e a probabilidade não estiver alta (indicando que o trade não está evoluindo bem), o sistema sai para evitar ficar preso em um trade que não está progredindo. Importante: se após 60 segundos o trade continua favorável (probabilidade alta, ganhando), o bot permanece no trade.
+5. **MAX_TRADE_TIME (60 segundos)** - Stop de risco usado quando o fluxo está em **EXIT** (não em TREND/HOLD).
 
-   **Como é calculado:** A cada novo preço recebido, o sistema calcula a duração do trade: `trade_duration = now - entry_time`. Se `trade_duration >= 60` segundos, o sistema verifica se deve sair. Na prática, se o trade está indo bem (probabilidade alta), ele permanece; se não está evoluindo (probabilidade baixa), sai.
+   **Como é calculado:** A cada novo preço recebido, o sistema calcula a duração do trade: `trade_duration = now - entry_time`. Se `trade_duration >= 60` segundos **e** o fluxo está em EXIT, o sistema sai para não ficar preso em trade que perdeu estrutura.
 
 **Cálculo da Probabilidade:** A probabilidade é recalculada continuamente através da função `compute_probability()`, que:
 - Calcula o sinal de flow: `flow = (buy_volume - sell_volume) / (buy_volume + sell_volume)`
@@ -53,11 +58,11 @@ O **BotTrader** é um sistema de trading automatizado para criptomoedas que oper
 
 O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 - **Stop Financeiro (MAX_LOSS_PCT):** Perda de -0.2% (protege capital)
-- **Stop por Fluxo (FLOW_STOP_THRESHOLD):** Probabilidade cai para ≤ 35% (sinal de reversão)
-- **Exit por Probabilidade (EXIT_THRESHOLD):** Probabilidade cai para ≤ 45% (condições mudaram)
-- **Stop por Tempo (MAX_TRADE_TIME):** Trade dura mais de 60 segundos E não está indo bem (protege de trades que não evoluem)
+- **Reversão Confirmada:** Pelo menos 2 sinais de reversão com fluxo fora de TREND
+- **Stop por Fluxo (FLOW_STOP_THRESHOLD):** Probabilidade cai para ≤ 35% **e** reversão confirmada (sinal forte)
+- **Stop por Tempo (MAX_TRADE_TIME):** Trade dura mais de 60 segundos **e** fluxo está em EXIT
 
-**Importante:** O stop por tempo (MAX_TRADE_TIME) só é ativado se o trade não estiver indo bem. Se após 60 segundos o trade continua favorável (probabilidade alta, ganhando), o bot permanece no trade.
+**Importante:** A zona HOLD é onde o dinheiro está. O bot mantém a mão e só sai com prova de reversão (persistência, não tick isolado).
 
 ### **Análise em Tempo Real**
 - Conecta diretamente ao WebSocket da Binance
@@ -85,7 +90,7 @@ O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 ### Por Que Perde Tão Pouco?
 
 1. **Stop Loss de 0.2%:** Máxima perda por trade é limitada
-2. **Saída Rápida:** Sai imediatamente quando condições mudam
+2. **Saída com Prova:** Só sai quando a reversão se confirma
 3. **Entrada Seletiva:** Só entra em situações muito favoráveis
 
 ### Por Que Ganha Tanto?

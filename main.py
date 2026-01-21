@@ -22,6 +22,24 @@ ENTRY_THRESHOLD = 0.65
 POTENTIAL_WEIGHT = 0.15  # Peso do potencial na probabilidade final (15%)
 EXIT_THRESHOLD = 0.45
 
+# Zonas de fluxo (manter a mão em pullbacks)
+FLOW_TREND_THRESHOLD = ENTRY_THRESHOLD
+FLOW_HOLD_THRESHOLD = EXIT_THRESHOLD
+
+# Delta acumulado e reversão confirmada
+CUM_DELTA_WINDOW = 120
+CUM_DELTA_EXIT_THRESHOLD = -0.12
+AGGRESSION_RATIO_EXIT = 0.45
+REVERSAL_MIN_SIGNALS = 2
+
+# Falha estrutural e absorção
+FAIL_HIGH_PCT = 0.0015
+ABSORPTION_LOOKBACK = 20
+ABSORPTION_STALL_PCT = 0.0003
+ABSORPTION_FLOW_THRESHOLD = 0.25
+VOLUME_SURGE_MULTIPLIER = 1.4
+VOLUME_FLOW_THRESHOLD = 0.2
+
 MAX_LOSS_PCT = 0.002
 MAX_TRADE_TIME = 60
 FLOW_STOP_THRESHOLD = 0.35
@@ -97,6 +115,7 @@ total_fees_leveraged = 0.0
 state = "FORA"
 entry_price = None
 entry_time = None
+peak_price = None
 
 buy_volume = 0.0
 sell_volume = 0.0
@@ -241,11 +260,18 @@ analysis_interval = clamp(avg_interval * ANALYSIS_INTERVAL_MULTIPLIER,
 Entrada:
 - prob >= ENTRY_THRESHOLD
 
-Saida:
-- pnl_return <= -MAX_LOSS_PCT (stop financeiro)
-- prob <= FLOW_STOP_THRESHOLD (stop por fluxo)
-- trade_duration >= MAX_TRADE_TIME (stop tempo)
-- prob <= EXIT_THRESHOLD
+Saida (mantendo a mao em pullbacks):
+- stop financeiro: pnl_return <= -MAX_LOSS_PCT (proteção de risco)
+- estados de fluxo:
+  - TREND: prob >= 0.65 (segura)
+  - HOLD:  0.45 <= prob < 0.65 (zona de ruido/absorção, não sai)
+  - EXIT:  prob < 0.45 (só sai se houver prova)
+- reversão confirmada: precisa de pelo menos 2 sinais:
+  - falha em fazer novo high (pullback com momentum <= 0)
+  - delta acumulado negativo + agressão compradora fraca
+  - absorção no lado vendedor (volume alto, preço parado)
+  - volume contra o preço (surto de volume vendedor)
+- stop por tempo: só é usado quando o fluxo está em EXIT
 
 Por que funciona:
 combina risco maximo, deterioracao de fluxo e tempo maximo por trade.
@@ -454,6 +480,10 @@ def record_analysis_snapshot(now, price, probability, components):
             "momentum": components.get("momentum"),
             "pattern": components.get("pattern"),
         },
+        "flow_state": components.get("flow_state"),
+        "cum_delta_ratio": components.get("cum_delta_ratio"),
+        "aggression_ratio": components.get("aggression_ratio"),
+        "reversal_count": components.get("reversal_count"),
         "pattern_key": serialize_pattern_key(components.get("pattern_key")),
         "pattern_win_rate": components.get("pattern_win_rate"),
         "analysis_interval": interval,
@@ -493,6 +523,38 @@ def compute_flow_signal(buy, sell):
     return clamp((buy - sell) / total, -1.0, 1.0)
 
 
+def compute_cum_delta(trades, lookback):
+    if not trades:
+        return None, None, None, None
+    trades_list = list(trades)
+    start_index = max(0, len(trades_list) - lookback)
+    buy = 0.0
+    sell = 0.0
+    for trade in trades_list[start_index:]:
+        qty = trade.get("qty", 0.0)
+        if qty <= 0 or not math.isfinite(qty):
+            continue
+        if trade.get("side") == "buy":
+            buy += qty
+        else:
+            sell += qty
+    total = buy + sell
+    if total <= 0:
+        return None, None, None, None
+    cum_delta = buy - sell
+    ratio = cum_delta / total
+    aggression_ratio = buy / total
+    return cum_delta, total, ratio, aggression_ratio
+
+
+def get_flow_state(probability):
+    if probability >= FLOW_TREND_THRESHOLD:
+        return "TREND"
+    if probability >= FLOW_HOLD_THRESHOLD:
+        return "HOLD"
+    return "EXIT"
+
+
 def compute_returns(prices, lookback):
     if len(prices) < 2:
         return []
@@ -506,6 +568,16 @@ def compute_returns(prices, lookback):
             continue
         returns.append((curr - prev) / prev)
     return returns
+
+
+def compute_price_change(prices, lookback):
+    if len(prices) < lookback:
+        return None
+    first = prices[-lookback]
+    last = prices[-1]
+    if first <= MIN_PRICE or last <= MIN_PRICE or not math.isfinite(first) or not math.isfinite(last):
+        return None
+    return (last - first) / first
 
 
 def compute_volatility(prices):
@@ -530,6 +602,56 @@ def compute_momentum_signal(prices, volatility):
     scale = volatility if volatility is not None else MOMENTUM_VOL_FALLBACK
     signal = math.tanh((raw / (scale + EPSILON)) * MOMENTUM_SCALE)
     return clamp(signal, -1.0, 1.0)
+
+
+def compute_reversal_signals(price, components, cum_delta_ratio, aggression_ratio, peak_price_value):
+    signals = {}
+    short_flow_signal = components.get("short_flow")
+    momentum_signal = components.get("momentum")
+
+    delta_against = (
+        cum_delta_ratio is not None
+        and aggression_ratio is not None
+        and cum_delta_ratio <= CUM_DELTA_EXIT_THRESHOLD
+        and aggression_ratio <= AGGRESSION_RATIO_EXIT
+    )
+    signals["delta_against"] = delta_against
+
+    failed_high = False
+    if peak_price_value is not None and peak_price_value > MIN_PRICE:
+        pullback = (peak_price_value - price) / peak_price_value
+        if pullback >= FAIL_HIGH_PCT and (momentum_signal is not None and momentum_signal <= 0):
+            failed_high = True
+    signals["failed_high"] = failed_high
+
+    absorption_sell = False
+    price_change_short = compute_price_change(price_window, ABSORPTION_LOOKBACK)
+    if (
+        price_change_short is not None
+        and abs(price_change_short) <= ABSORPTION_STALL_PCT
+        and short_flow_signal is not None
+        and short_flow_signal <= -ABSORPTION_FLOW_THRESHOLD
+    ):
+        absorption_sell = True
+    signals["absorption_sell"] = absorption_sell
+
+    volume_against = False
+    if len(short_trades_window) >= 5 and len(trades_window) >= 5:
+        short_total = short_buy_volume + short_sell_volume
+        long_total = buy_volume + sell_volume
+        short_avg = safe_div(short_total, len(short_trades_window), 0.0)
+        long_avg = safe_div(long_total, len(trades_window), 0.0)
+        if (
+            long_avg > 0
+            and short_avg >= long_avg * VOLUME_SURGE_MULTIPLIER
+            and short_flow_signal is not None
+            and short_flow_signal <= -VOLUME_FLOW_THRESHOLD
+            and (momentum_signal is None or momentum_signal <= 0)
+        ):
+            volume_against = True
+    signals["volume_against"] = volume_against
+
+    return signals
 
 
 def build_pattern_key(flow_signal, short_flow_signal, momentum_signal):
@@ -688,7 +810,7 @@ def format_float(value, precision=4):
 
 
 def evaluate_decision(price, timestamp):
-    global state, entry_price, entry_time
+    global state, entry_price, entry_time, peak_price
     global total_pnl, wins, losses
     global equity, equity_leveraged
     global total_pnl_leveraged
@@ -705,16 +827,23 @@ def evaluate_decision(price, timestamp):
 
     with lock:
         prob, components = compute_probability(now)
+        flow_state = get_flow_state(prob)
+        _, _, cum_delta_ratio, aggression_ratio = compute_cum_delta(trades_window, CUM_DELTA_WINDOW)
+
+        components["flow_state"] = flow_state
+        components["cum_delta_ratio"] = cum_delta_ratio
+        components["aggression_ratio"] = aggression_ratio
+        components["reversal_count"] = 0
+        components["reversal_signals"] = {}
+
         last_probability = prob
         last_components = components
-        record_analysis_snapshot(now, price, prob, components)
 
         if state == "FORA":
             # Validar saldo antes de entrar
-            if equity < MIN_EQUITY_TO_TRADE:
-                return  # Saldo insuficiente, não entra
-            
-            if prob >= ENTRY_THRESHOLD:
+            can_enter = equity >= MIN_EQUITY_TO_TRADE
+
+            if can_enter and prob >= ENTRY_THRESHOLD:
                 # Validação adicional: preço deve ser válido
                 if price is None or price <= MIN_PRICE or not math.isfinite(price):
                     return  # Preço inválido, não entra
@@ -722,6 +851,7 @@ def evaluate_decision(price, timestamp):
                 state = "DENTRO"
                 entry_price = price
                 entry_time = now
+                peak_price = price
                 entry_snapshot = {
                     "prob": prob,
                     "components": dict(components),
@@ -734,6 +864,7 @@ def evaluate_decision(price, timestamp):
             if entry_price is None or entry_time is None:
                 state = "FORA"
                 entry_snapshot = None
+                peak_price = None
                 return
 
             # Proteção contra preços inválidos durante o trade
@@ -751,12 +882,28 @@ def evaluate_decision(price, timestamp):
             
             trade_duration = now - entry_time
 
-            stop_financeiro = pnl_return <= -MAX_LOSS_PCT
-            stop_fluxo = prob <= FLOW_STOP_THRESHOLD
-            stop_tempo = trade_duration >= MAX_TRADE_TIME
-            exit_prob = prob <= EXIT_THRESHOLD
+            if peak_price is None or price > peak_price:
+                peak_price = price
 
-            if stop_financeiro or stop_fluxo or stop_tempo or exit_prob:
+            reversal_signals = compute_reversal_signals(
+                price,
+                components,
+                cum_delta_ratio,
+                aggression_ratio,
+                peak_price,
+            )
+            reversal_count = sum(1 for active in reversal_signals.values() if active)
+            reversal_confirmed = reversal_count >= REVERSAL_MIN_SIGNALS
+            components["reversal_count"] = reversal_count
+            components["reversal_signals"] = reversal_signals
+            components["peak_price"] = peak_price
+
+            stop_financeiro = pnl_return <= -MAX_LOSS_PCT
+            stop_fluxo = prob <= FLOW_STOP_THRESHOLD and reversal_confirmed
+            stop_tempo = trade_duration >= MAX_TRADE_TIME and flow_state == "EXIT"
+            exit_reversao = reversal_confirmed and flow_state != "TREND"
+
+            if stop_financeiro or stop_fluxo or stop_tempo or exit_reversao:
                 entry_equity = entry_snapshot.get("equity") if entry_snapshot else equity
                 entry_equity_leveraged = (
                     entry_snapshot.get("equity_leveraged") if entry_snapshot else equity_leveraged
@@ -786,6 +933,7 @@ def evaluate_decision(price, timestamp):
                     total_losses_leveraged += abs(pnl_amount_leveraged)
 
                 entry_components = entry_snapshot["components"] if entry_snapshot else {}
+                reversal_flags = [name for name, active in reversal_signals.items() if active]
                 trade_entry = {
                     "symbol": SYMBOL,
                     "app_version": APP_VERSION,
@@ -802,6 +950,13 @@ def evaluate_decision(price, timestamp):
                     "duration": trade_duration,
                     "entry_prob": entry_snapshot["prob"] if entry_snapshot else None,
                     "exit_prob": prob,
+                    "entry_flow_state": entry_components.get("flow_state"),
+                    "exit_flow_state": flow_state,
+                    "exit_cum_delta_ratio": cum_delta_ratio,
+                    "exit_aggression_ratio": aggression_ratio,
+                    "exit_reversal_count": reversal_count,
+                    "exit_reversal_signals": reversal_flags,
+                    "peak_price": peak_price,
                     "entry_equity": entry_equity,
                     "exit_equity": equity,
                     "entry_equity_leveraged": entry_equity_leveraged,
@@ -831,6 +986,7 @@ def evaluate_decision(price, timestamp):
                         "STOP_FINANCEIRO" if stop_financeiro else
                         "STOP_FLUXO" if stop_fluxo else
                         "STOP_TEMPO" if stop_tempo else
+                        "REVERSAO_CONFIRMADA" if exit_reversao else
                         "EXIT_PROB"
                     ),
                     "buy_volume": buy_volume,
@@ -845,6 +1001,9 @@ def evaluate_decision(price, timestamp):
                 entry_price = None
                 entry_time = None
                 entry_snapshot = None
+                peak_price = None
+
+        record_analysis_snapshot(now, price, prob, components)
 
 
 def print_status():
@@ -874,6 +1033,10 @@ def print_status():
         volatility = last_components.get("volatility") if last_components else None
         pattern_key = last_components.get("pattern_key") if last_components else None
         pattern_win_rate = last_components.get("pattern_win_rate") if last_components else None
+        flow_state = last_components.get("flow_state") if last_components else None
+        cum_delta_ratio = last_components.get("cum_delta_ratio") if last_components else None
+        aggression_ratio = last_components.get("aggression_ratio") if last_components else None
+        reversal_count = last_components.get("reversal_count") if last_components else None
         history_count = len(trade_history)
         analysis_count = len(analysis_history)
         analysis_interval = compute_analysis_interval()
@@ -885,9 +1048,10 @@ def print_status():
 {border}
 BOTTRADER STATUS
 {border}
-STATE: {state} | PRICE: {last_price:.2f}
+STATE: {state} | FLOW: {flow_state if flow_state else "n/a"} | PRICE: {last_price:.2f}
 {section}
 PROB: {last_probability:.2f} | CONF: {format_float(confidence, 2)} | VOL: {format_float(volatility, 5)}
+REV: {reversal_count if reversal_count is not None else "n/a"} | CΔ: {format_signal(cum_delta_ratio)} | AGR: {format_float(aggression_ratio, 2)}
 SIGNALS: FLOW={format_signal(last_components.get("flow") if last_components else None)} SHORT={format_signal(last_components.get("short_flow") if last_components else None)} MOM={format_signal(last_components.get("momentum") if last_components else None)} PAT={format_signal(last_components.get("pattern") if last_components else None)}
 PATTERN: {pattern_key if pattern_key is not None else "n/a"} | WR: {format_float(pattern_win_rate, 2)}
 {section}
