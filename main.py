@@ -8,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
