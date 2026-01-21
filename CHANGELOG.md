@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.6] - 2026-01-21
+- Documentacao paginada no console
+
 ## [0.3.5] - 2026-01-21
 - Documentacao tecnica detalhada com formulas e pesos
 

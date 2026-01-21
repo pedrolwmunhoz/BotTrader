@@ -8,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
@@ -704,20 +704,56 @@ def print_menu():
 """)
 
 
-def show_documentation():
+def get_page_size():
+    try:
+        height = os.get_terminal_size().lines
+    except OSError:
+        height = 24
+    return max(10, height - 6)
+
+
+def paginate_text(text, title):
+    lines = text.splitlines()
+    total = len(lines)
+    if total == 0:
+        print("README vazio.")
+        input("Pressione ENTER para voltar ao menu...")
+        return
+
+    page_size = get_page_size()
+    index = 0
     border = "=" * 78
-    print(f"""
-{border}
-DOCUMENTACAO
-{border}
-""")
+
+    while True:
+        end = min(total, index + page_size)
+        print(f"\n{border}\n{title} ({index + 1}-{end} de {total})\n{border}")
+        for line in lines[index:end]:
+            print(line)
+        print(border)
+
+        prompt = "N=proxima, P=anterior, Q=sair: "
+        choice = input(prompt).strip().lower()
+        if choice in ("q", "s", "sair", "exit"):
+            break
+        if choice in ("p", "prev", "anterior"):
+            index = max(0, index - page_size)
+            continue
+        if choice in ("n", "next", "proxima", "próxima", ""):
+            if end >= total:
+                break
+            index = end
+
+
+def show_documentation():
     try:
         with open(os.path.join(os.path.dirname(__file__), "README.md"), "r", encoding="utf-8") as handler:
-            print(handler.read().strip())
+            content = handler.read()
     except OSError as exc:
         print(f"Falha ao ler README: {exc}")
-    print(f"\nVERSAO: {APP_VERSION}\n{border}")
-    input("Pressione ENTER para voltar ao menu...")
+        input("Pressione ENTER para voltar ao menu...")
+        return
+
+    paginate_text(content, "DOCUMENTACAO - README")
 
 
 def menu_loop():
