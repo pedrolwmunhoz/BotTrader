@@ -8,9 +8,9 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.7"
+APP_VERSION = "0.4.0"
 
-SYMBOL = "btcusdt"
+SYMBOL = "btcusdt"  # BTC/USDT Futuros USDⓈ-M
 WINDOW_TRADES = 500
 SHORT_WINDOW_TRADES = 80
 PRICE_WINDOW = 200
@@ -19,12 +19,22 @@ MOMENTUM_LOOKBACK = 30
 VOLATILITY_LOOKBACK = 60
 
 ENTRY_THRESHOLD = 0.65
+POTENTIAL_WEIGHT = 0.15  # Peso do potencial na probabilidade final (15%)
 EXIT_THRESHOLD = 0.45
 
 MAX_LOSS_PCT = 0.002
 MAX_TRADE_TIME = 60
 FLOW_STOP_THRESHOLD = 0.35
 LEVERAGE = 3.0
+MIN_EQUITY_TO_TRADE = 10.0  # Saldo mínimo para operar
+MIN_PRICE = 1.0  # Preço mínimo válido (proteção contra dados zerados)
+
+# Taxas Binance (Futuros USDⓈ-M - Taker)
+# Taker: 0.04% por operação
+# Entrada: 0.04% | Saída: 0.04% = 0.08% total por trade
+BINANCE_FEE_RATE = 0.0004  # 0.04% por operação (taker)
+SLIPPAGE_RATE = 0.0  # Takers não têm slippage significativo (ordens market)
+MIN_PROFIT_POTENTIAL = 0.0008  # 0.08% mínimo de potencial de lucro para compensar taxas (entrada + saída)
 
 PATTERN_MIN_TRADES = 8
 PATTERN_BUCKET_STEP = 0.2
@@ -76,6 +86,12 @@ total_gains = 0.0
 total_losses = 0.0
 total_gains_leveraged = 0.0
 total_losses_leveraged = 0.0
+total_fees_unleveraged = 0.0
+total_fees_leveraged = 0.0
+total_fees_unleveraged = 0.0
+total_fees_leveraged = 0.0
+total_fees_unleveraged = 0.0
+total_fees_leveraged = 0.0
 
 # ================= ESTADO =================
 state = "FORA"
@@ -484,9 +500,11 @@ def compute_returns(prices, lookback):
     returns = []
     for i in range(start, len(prices)):
         prev = prices[i - 1]
-        if prev <= 0:
+        curr = prices[i]
+        # Proteção contra preços inválidos
+        if prev <= MIN_PRICE or curr <= MIN_PRICE or not math.isfinite(prev) or not math.isfinite(curr):
             continue
-        returns.append((prices[i] - prev) / prev)
+        returns.append((curr - prev) / prev)
     return returns
 
 
@@ -505,7 +523,8 @@ def compute_momentum_signal(prices, volatility):
     start = len(prices) - MOMENTUM_LOOKBACK
     first = prices[start]
     last = prices[-1]
-    if first <= 0:
+    # Proteção contra preços inválidos
+    if first <= MIN_PRICE or last <= MIN_PRICE or not math.isfinite(first) or not math.isfinite(last):
         return None
     raw = (last - first) / first
     scale = volatility if volatility is not None else MOMENTUM_VOL_FALLBACK
@@ -605,6 +624,7 @@ def compute_probability(now):
             "pattern_last_seen": pattern_meta.get("last_seen") if pattern_meta else None,
             "volatility": volatility,
             "confidence": DEFAULT_CONFIDENCE,
+            "estimated_move_pct": 0.0,  # Sem sinais, potencial zero
         }
 
     weighted_sum = sum(weights[name] * signals[name] for name in weights)
@@ -613,8 +633,34 @@ def compute_probability(now):
     base_prob = 0.5 + 0.5 * raw_signal
 
     confidence = compute_confidence(volatility)
-    final_prob = 0.5 + (base_prob - 0.5) * confidence
+    base_final_prob = 0.5 + (base_prob - 0.5) * confidence
 
+    # Calcular potencial de lucro estimado (probabilístico)
+    # Usa a probabilidade e movimento esperado para calcular valor esperado
+    # Valor esperado = (prob × ganho_esperado) - ((1 - prob) × perda_esperada)
+    vol_adj = volatility if volatility is not None and volatility > 0 else MOMENTUM_VOL_FALLBACK
+    momentum_factor = abs(momentum_signal) if momentum_signal is not None else 0.0
+    flow_factor = abs(flow_signal) if flow_signal is not None else 0.0
+    signal_strength = (abs(raw_signal) * 0.6 + momentum_factor * 0.3 + flow_factor * 0.1)
+    
+    # Movimento esperado se der certo (baseado na força do sinal)
+    expected_gain_pct = signal_strength * vol_adj * confidence * 3.0  # Movimento esperado em % se acertar
+    # Perda esperada se der errado (stop loss)
+    expected_loss_pct = MAX_LOSS_PCT  # 0.2% (stop loss)
+    
+    # Valor esperado probabilístico: (prob × ganho) - ((1 - prob) × perda)
+    # Mas como só entra se prob >= 0.65, ajusta para considerar apenas probabilidades altas
+    prob_adjusted = (base_final_prob - 0.5) * 2.0  # Normaliza para 0-1 quando prob >= 0.5
+    expected_value_pct = (prob_adjusted * expected_gain_pct) - ((1.0 - prob_adjusted) * expected_loss_pct)
+    
+    estimated_move_pct = max(0.0, expected_value_pct)  # Potencial líquido esperado
+    
+    # Ajustar probabilidade final baseado no potencial
+    # Potencial > 0.08% aumenta prob, potencial < 0.08% diminui prob
+    potential_factor = clamp((estimated_move_pct / MIN_PROFIT_POTENTIAL), 0.5, 2.0)  # 0.5x a 2.0x
+    potential_adjustment = (potential_factor - 1.0) * POTENTIAL_WEIGHT  # Ajuste de -7.5% a +15%
+    final_prob = clamp(base_final_prob + potential_adjustment, 0.0, 1.0)
+    
     return clamp(final_prob, 0.0, 1.0), {
         "flow": flow_signal,
         "short_flow": short_flow_signal,
@@ -625,9 +671,10 @@ def compute_probability(now):
         "pattern_trades_count": pattern_meta.get("trades_count") if pattern_meta else None,
         "pattern_recent_count": pattern_meta.get("recent_count") if pattern_meta else None,
         "pattern_last_seen": pattern_meta.get("last_seen") if pattern_meta else None,
-        "volatility": volatility,
-        "confidence": confidence,
-    }
+            "volatility": volatility,
+            "confidence": confidence,
+            "estimated_move_pct": estimated_move_pct,
+        }
 
 
 def format_signal(value):
@@ -647,7 +694,12 @@ def evaluate_decision(price, timestamp):
     global total_pnl_leveraged
     global total_gains, total_losses
     global total_gains_leveraged, total_losses_leveraged
+    global total_fees_unleveraged, total_fees_leveraged
     global last_probability, last_components, entry_snapshot
+
+    # Ignora completamente se preço inválido - não analisa nada
+    if price is None or price <= MIN_PRICE or not math.isfinite(price):
+        return  # Ignora completamente, não processa nada
 
     now = timestamp
 
@@ -658,7 +710,15 @@ def evaluate_decision(price, timestamp):
         record_analysis_snapshot(now, price, prob, components)
 
         if state == "FORA":
+            # Validar saldo antes de entrar
+            if equity < MIN_EQUITY_TO_TRADE:
+                return  # Saldo insuficiente, não entra
+            
             if prob >= ENTRY_THRESHOLD:
+                # Validação adicional: preço deve ser válido
+                if price is None or price <= MIN_PRICE or not math.isfinite(price):
+                    return  # Preço inválido, não entra
+                
                 state = "DENTRO"
                 entry_price = price
                 entry_time = now
@@ -676,7 +736,19 @@ def evaluate_decision(price, timestamp):
                 entry_snapshot = None
                 return
 
+            # Proteção contra preços inválidos durante o trade
+            if price is None or price <= MIN_PRICE or not math.isfinite(price):
+                return  # Ignora atualizações com preço inválido, não faz nada
+
+            # Proteção no cálculo de PnL
+            if entry_price <= MIN_PRICE or not math.isfinite(entry_price):
+                return  # Entry price inválido, ignora
+            
             pnl_return = (price - entry_price) / entry_price
+            # Proteção contra PnL inválido
+            if not math.isfinite(pnl_return):
+                return  # PnL inválido, ignora
+            
             trade_duration = now - entry_time
 
             stop_financeiro = pnl_return <= -MAX_LOSS_PCT
@@ -691,6 +763,13 @@ def evaluate_decision(price, timestamp):
                 )
                 pnl_amount = entry_equity * pnl_return
                 pnl_amount_leveraged = entry_equity_leveraged * pnl_return * LEVERAGE
+
+                # Calcular taxas deste trade (Taker)
+                # Taker: 0.04% entrada + 0.04% saída = 0.08% total por trade
+                trade_fee_unleveraged = entry_equity * BINANCE_FEE_RATE * 2  # Entrada + Saída
+                trade_fee_leveraged = entry_equity_leveraged * LEVERAGE * BINANCE_FEE_RATE * 2  # Entrada + Saída
+                total_fees_unleveraged += trade_fee_unleveraged
+                total_fees_leveraged += trade_fee_leveraged
 
                 total_pnl += pnl_amount
                 total_pnl_leveraged += pnl_amount_leveraged
@@ -778,6 +857,19 @@ def print_status():
         net_leveraged = equity_leveraged - INITIAL_EQUITY
         net_total = total_gains - total_losses
         net_total_leveraged = total_gains_leveraged - total_losses_leveraged
+        gains_pct = (total_gains / INITIAL_EQUITY * 100) if INITIAL_EQUITY > 0 else 0
+        gains_leveraged_pct = (total_gains_leveraged / INITIAL_EQUITY * 100) if INITIAL_EQUITY > 0 else 0
+        losses_pct = (total_losses / INITIAL_EQUITY * 100) if INITIAL_EQUITY > 0 else 0
+        losses_leveraged_pct = (total_losses_leveraged / INITIAL_EQUITY * 100) if INITIAL_EQUITY > 0 else 0
+        
+        # Taxas já estão acumuladas nas variáveis globais (atualizadas a cada trade)
+        fees_pct_unleveraged = (total_fees_unleveraged / INITIAL_EQUITY * 100) if INITIAL_EQUITY > 0 else 0
+        fees_pct_leveraged = (total_fees_leveraged / INITIAL_EQUITY * 100) if INITIAL_EQUITY > 0 else 0
+        
+        # Patrimônio líquido após taxas
+        equity_after_fees = equity - total_fees_unleveraged
+        equity_leveraged_after_fees = equity_leveraged - total_fees_leveraged
+        
         confidence = last_components.get("confidence") if last_components else None
         volatility = last_components.get("volatility") if last_components else None
         pattern_key = last_components.get("pattern_key") if last_components else None
@@ -803,13 +895,13 @@ BUY VOL:  {buy_volume:.4f} | SHORT: {short_buy_volume:.4f}
 SELL VOL: {sell_volume:.4f} | SHORT: {short_sell_volume:.4f}
 {section}
 TRADES: {total_trades} | ACERTOS: {wins} | ERROS: {losses} | WINRATE: {winrate:.2f}%
-GANHO % (SEM ALAV.): {equity_pct:+.2f}% | PERDAS: {total_losses:.2f} | GANHOS: {total_gains:.2f}
-GANHO % (ALAV. {LEVERAGE:.1f}x): {equity_leveraged_pct:+.2f}% | PERDAS: {total_losses_leveraged:.2f} | GANHOS: {total_gains_leveraged:.2f}
-LÍQUIDO: {net_unleveraged:+.2f} | LÍQUIDO ALAV.: {net_leveraged:+.2f}
-LÍQUIDO TOTAL: {net_total:+.2f} | LÍQUIDO TOTAL ALAV.: {net_total_leveraged:+.2f}
+GANHOS: +${total_gains:.2f} ({gains_pct:+.2f}%) (sem alav) | +${total_gains_leveraged:.2f} ({gains_leveraged_pct:+.2f}%) (com alav)
+PERDAS: -${total_losses:.2f} ({losses_pct:+.2f}%) (sem alav) | -${total_losses_leveraged:.2f} ({losses_leveraged_pct:+.2f}%) (com alav)
+TAXAS: -${total_fees_unleveraged:.2f} ({fees_pct_unleveraged:+.2f}%) (sem alav) | -${total_fees_leveraged:.2f} ({fees_pct_leveraged:+.2f}%) (com alav)
+TOTAL PATRIMÔNIO LÍQUIDO: ${equity:.2f} | ${equity_leveraged:.2f}
+TOTAL PATRIMÔNIO APÓS TAXAS: ${equity_after_fees:.2f} | ${equity_leveraged_after_fees:.2f}
+HISTORY: {history_count}
 {section}
-HISTORY: {history_count} | ANALYSIS: {analysis_count} | INTERVAL: {analysis_interval:.2f}s | BUCKET: {current_bucket}
-PATRIMÔNIO: {equity:.2f} | PATRIMÔNIO ALAV.: {equity_leveraged:.2f}
 VERSÃO: {APP_VERSION}
 {border}
 """)
@@ -904,6 +996,13 @@ def on_message(ws, message):
     trade_time = data.get("T") or data.get("E")
     timestamp = trade_time / 1000 if trade_time is not None else time.time()
 
+    # Proteção contra preços inválidos ou zerados - ignora completamente o tick
+    if price is None or price <= MIN_PRICE or not math.isfinite(price):
+        return  # Ignora completamente, não processa nada
+    
+    if qty is None or qty <= 0 or not math.isfinite(qty):
+        return  # Ignora completamente, não processa nada
+
     with lock:
         last_price = price
         price_window.append(price)
@@ -951,7 +1050,9 @@ def on_error(ws, error):
 
 
 def start_ws():
-    url = f"wss://stream.binance.com:9443/ws/{SYMBOL}@trade"
+    # WebSocket para Futuros USDⓈ-M (não Spot)
+    # Em futuros, os trades são contratos, não moedas físicas
+    url = f"wss://fstream.binance.com/ws/{SYMBOL}@trade"
     ws = websocket.WebSocketApp(
         url,
         on_message=on_message,

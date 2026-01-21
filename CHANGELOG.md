@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0] - 2026-01-21
+- Migração para Binance Futuros USDⓈ-M (WebSocket fstream.binance.com)
+- Sistema agora opera como Taker (taxas 0.04% por operação, 0.08% total por trade)
+- Cálculo probabilístico de potencial de lucro (valor esperado)
+- Potencial pesa 15% na probabilidade final de entrada
+- Validação de saldo mínimo ($10) antes de entrar
+- Proteção contra preços inválidos/zerados (ignora completamente ticks inválidos)
+- Taxas calculadas e descontadas automaticamente (exibidas no console)
+- Melhorias na validação de dados em todos os cálculos
+- Console mostra "TOTAL PATRIMÔNIO APÓS TAXAS" com resultado líquido real
+
 ## [0.3.7] - 2026-01-21
 - Documentacao do console embutida no codigo (estilo game)
 
