@@ -5,7 +5,7 @@ As decisoes de entrada e saida sao geradas a partir de sinais de fluxo de
 ordens, momentum de preco e padroes historicos, com ajuste por volatilidade.
 
 ## Versao
-- 0.3.6
+- 0.3.7
 
 ## Requisitos
 - Python 3.10+
@@ -208,6 +208,7 @@ Principais parametros em main.py:
 - O bot inicia com um menu no console.
 - Opcoes: Real time (status em tempo real) e Documentacao.
 - A documentacao abre com paginacao no console.
+- A documentacao exibida no console e embutida no codigo (sem ler README).
 
 ## Observacoes
 - Sem mocks: o bot consome dados reais via WebSocket.
