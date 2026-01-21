@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] - 2026-01-21
+- Patrimonio baseado em retorno percentual sem alavancagem
+- Totais e liquido com alavancagem configuravel
+- Status com ganhos, perdas e acertos detalhados
+
 ## [0.3.0] - 2026-01-21
 - Historico persistente de negocios e analises em JSONL
 - Filtragem por janela temporal e bucket atual ao buscar historico

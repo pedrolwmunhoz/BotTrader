@@ -5,7 +5,7 @@ As decisoes de entrada e saida sao geradas a partir de sinais de fluxo de
 ordens, momentum de preco e padroes historicos, com ajuste por volatilidade.
 
 ## Versao
-- 0.3.0
+- 0.3.1
 
 ## Requisitos
 - Python 3.10+
@@ -38,6 +38,13 @@ volatilidade esta alta, aproximando a probabilidade de 0.5.
   (PATTERN_RECENCY_DAYS e PATTERN_MIN_TRADES).
 - O espacamento do historico de probabilidades e adaptado ao volume de dados
   com ANALYSIS_INTERVAL_MULTIPLIER, MIN_ANALYSIS_INTERVAL e MAX_ANALYSIS_INTERVAL.
+
+## Patrimonio e alavancagem
+- Patrimonio sem alavancagem e calculado por variacao percentual do preco
+  (composto por operacao) com base em INITIAL_EQUITY.
+- Patrimonio com alavancagem usa o mesmo retorno percentual multiplicado por
+  LEVERAGE para comparacao.
+- Ganhos, perdas, acertos e liquido sao exibidos separadamente no status.
 
 ## Configuracao rapida
 Principais parametros em main.py:

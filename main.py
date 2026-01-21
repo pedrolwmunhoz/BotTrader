@@ -8,7 +8,7 @@ from collections import deque
 import websocket
 
 # ================= CONFIGURAÇÃO =================
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 SYMBOL = "btcusdt"
 WINDOW_TRADES = 500
@@ -24,6 +24,7 @@ EXIT_THRESHOLD = 0.45
 MAX_LOSS_PCT = 0.002
 MAX_TRADE_TIME = 60
 FLOW_STOP_THRESHOLD = 0.35
+LEVERAGE = 3.0
 
 PATTERN_MIN_TRADES = 8
 PATTERN_BUCKET_STEP = 0.2
@@ -67,8 +68,13 @@ lock = threading.Lock()
 # ================= PATRIMÔNIO =================
 INITIAL_EQUITY = 10000.0
 equity = INITIAL_EQUITY
+equity_leveraged = INITIAL_EQUITY
+total_pnl = 0.0
+total_pnl_leveraged = 0.0
 total_gains = 0.0
 total_losses = 0.0
+total_gains_leveraged = 0.0
+total_losses_leveraged = 0.0
 
 # ================= ESTADO =================
 state = "FORA"
@@ -87,7 +93,6 @@ trade_history = []
 analysis_history = deque(maxlen=ANALYSIS_HISTORY_MAX_ENTRIES)
 last_analysis_ts = 0.0
 
-total_pnl = 0.0
 wins = 0
 losses = 0
 
@@ -499,7 +504,10 @@ def format_float(value, precision=4):
 def evaluate_decision(price, timestamp):
     global state, entry_price, entry_time
     global total_pnl, wins, losses
-    global equity, total_gains, total_losses
+    global equity, equity_leveraged
+    global total_pnl_leveraged
+    global total_gains, total_losses
+    global total_gains_leveraged, total_losses_leveraged
     global last_probability, last_components, entry_snapshot
 
     now = timestamp
@@ -519,6 +527,8 @@ def evaluate_decision(price, timestamp):
                     "prob": prob,
                     "components": dict(components),
                     "pattern_key": components.get("pattern_key"),
+                    "equity": equity,
+                    "equity_leveraged": equity_leveraged,
                 }
 
         elif state == "DENTRO":
@@ -527,39 +537,57 @@ def evaluate_decision(price, timestamp):
                 entry_snapshot = None
                 return
 
-            pnl_pct = (price - entry_price) / entry_price
+            pnl_return = (price - entry_price) / entry_price
             trade_duration = now - entry_time
 
-            stop_financeiro = pnl_pct <= -MAX_LOSS_PCT
+            stop_financeiro = pnl_return <= -MAX_LOSS_PCT
             stop_fluxo = prob <= FLOW_STOP_THRESHOLD
             stop_tempo = trade_duration >= MAX_TRADE_TIME
             exit_prob = prob <= EXIT_THRESHOLD
 
             if stop_financeiro or stop_fluxo or stop_tempo or exit_prob:
-                pnl = price - entry_price
-                total_pnl += pnl
-                equity += pnl
+                entry_equity = entry_snapshot.get("equity") if entry_snapshot else equity
+                entry_equity_leveraged = (
+                    entry_snapshot.get("equity_leveraged") if entry_snapshot else equity_leveraged
+                )
+                pnl_amount = entry_equity * pnl_return
+                pnl_amount_leveraged = entry_equity_leveraged * pnl_return * LEVERAGE
 
-                if pnl > 0:
+                total_pnl += pnl_amount
+                total_pnl_leveraged += pnl_amount_leveraged
+                equity = entry_equity + pnl_amount
+                equity_leveraged = entry_equity_leveraged + pnl_amount_leveraged
+
+                if pnl_amount > 0:
                     wins += 1
-                    total_gains += pnl
+                    total_gains += pnl_amount
+                    total_gains_leveraged += pnl_amount_leveraged
                 else:
                     losses += 1
-                    total_losses += abs(pnl)
+                    total_losses += abs(pnl_amount)
+                    total_losses_leveraged += abs(pnl_amount_leveraged)
 
                 entry_components = entry_snapshot["components"] if entry_snapshot else {}
                 trade_entry = {
                     "symbol": SYMBOL,
                     "app_version": APP_VERSION,
+                    "leverage": LEVERAGE,
                     "entry_time": entry_time,
                     "exit_time": now,
                     "entry_price": entry_price,
                     "exit_price": price,
-                    "pnl": pnl,
-                    "pnl_pct": pnl_pct * 100,
+                    "pnl": pnl_amount,
+                    "pnl_amount": pnl_amount,
+                    "pnl_amount_leveraged": pnl_amount_leveraged,
+                    "pnl_return": pnl_return,
+                    "pnl_pct": pnl_return * 100,
                     "duration": trade_duration,
                     "entry_prob": entry_snapshot["prob"] if entry_snapshot else None,
                     "exit_prob": prob,
+                    "entry_equity": entry_equity,
+                    "exit_equity": equity,
+                    "entry_equity_leveraged": entry_equity_leveraged,
+                    "exit_equity_leveraged": equity_leveraged,
                     "entry_confidence": entry_components.get("confidence"),
                     "exit_confidence": components.get("confidence"),
                     "entry_volatility": entry_components.get("volatility"),
@@ -606,6 +634,9 @@ def print_status():
         total_trades = wins + losses
         winrate = (wins / total_trades * 100) if total_trades > 0 else 0
         equity_pct = ((equity - INITIAL_EQUITY) / INITIAL_EQUITY * 100)
+        equity_leveraged_pct = ((equity_leveraged - INITIAL_EQUITY) / INITIAL_EQUITY * 100)
+        net_unleveraged = equity - INITIAL_EQUITY
+        net_leveraged = equity_leveraged - INITIAL_EQUITY
         confidence = last_components.get("confidence") if last_components else None
         volatility = last_components.get("volatility") if last_components else None
         pattern_key = last_components.get("pattern_key") if last_components else None
@@ -627,13 +658,17 @@ BUY VOL:  {buy_volume:.4f} | SHORT: {short_buy_volume:.4f}
 SELL VOL: {sell_volume:.4f} | SHORT: {short_sell_volume:.4f}
 
 TRADES: {total_trades}
-WINS: {wins}
-LOSSES: {losses}
+ACERTOS: {wins}
+ERROS: {losses}
 WINRATE: {winrate:.2f}%
+
+GANHO % (SEM ALAV.): {equity_pct:+.2f}% | PERDAS: {total_losses:.2f} | GANHOS: {total_gains:.2f}
+GANHO % (ALAV. {LEVERAGE:.1f}x): {equity_leveraged_pct:+.2f}% | PERDAS: {total_losses_leveraged:.2f} | GANHOS: {total_gains_leveraged:.2f}
+LÍQUIDO: {net_unleveraged:+.2f} | LÍQUIDO ALAV.: {net_leveraged:+.2f}
 
 HISTORY: {history_count} | ANALYSIS: {analysis_count} | INTERVAL: {analysis_interval:.2f}s | BUCKET: {current_bucket}
 
-PATRIMÔNIO: {equity:.2f} ({equity_pct:+.2f}%)
+PATRIMÔNIO: {equity:.2f} | PATRIMÔNIO ALAV.: {equity_leveraged:.2f}
 ----------------------------------
 """)
 
