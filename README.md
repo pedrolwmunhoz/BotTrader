@@ -5,7 +5,7 @@ As decisoes de entrada e saida sao geradas a partir de sinais de fluxo de
 ordens, momentum de preco e padroes historicos, com ajuste por volatilidade.
 
 ## Versao
-- 0.3.3
+- 0.3.4
 
 ## Requisitos
 - Python 3.10+
@@ -59,6 +59,10 @@ Principais parametros em main.py:
 ## Pesos do WebSocket
 - Os sinais de fluxo (flow e short_flow) tem peso maior para refletir os trades
   em tempo real vindos do WebSocket.
+
+## Menu
+- O bot inicia com um menu no console.
+- Opcoes: Real time (status em tempo real) e Documentacao.
 
 ## Observacoes
 - Sem mocks: o bot consome dados reais via WebSocket.
