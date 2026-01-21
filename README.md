@@ -5,7 +5,7 @@ As decisoes de entrada e saida sao geradas a partir de sinais de fluxo de
 ordens, momentum de preco e padroes historicos, com ajuste por volatilidade.
 
 ## Versao
-- 0.3.2
+- 0.3.3
 
 ## Requisitos
 - Python 3.10+

@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.3] - 2026-01-21
+- Status do console com boxes e secoes separadas
+
 ## [0.3.2] - 2026-01-21
 - Aumento do peso dos sinais de trades do WebSocket
 
