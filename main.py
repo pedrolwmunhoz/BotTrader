@@ -11,7 +11,8 @@ import websocket
 APP_VERSION = "0.4.0"
 
 SYMBOL = "btcusdt"  # BTC/USDT Futuros USDⓈ-M
-WINDOW_TRADES = 500
+WINDOW_TRADES = 200  # janela curta para entrada
+HOLD_WINDOW_TRADES = 800  # janela longa para permanência/saída
 SHORT_WINDOW_TRADES = 80
 PRICE_WINDOW = 200
 MIN_LOOKBACK = 50
@@ -123,9 +124,12 @@ buy_volume = 0.0
 sell_volume = 0.0
 short_buy_volume = 0.0
 short_sell_volume = 0.0
+hold_buy_volume = 0.0
+hold_sell_volume = 0.0
 
 trades_window = deque(maxlen=WINDOW_TRADES)
 short_trades_window = deque(maxlen=SHORT_WINDOW_TRADES)
+hold_trades_window = deque(maxlen=HOLD_WINDOW_TRADES)
 price_window = deque(maxlen=PRICE_WINDOW)
 trade_history = []
 analysis_history = deque(maxlen=ANALYSIS_HISTORY_MAX_ENTRIES)
@@ -168,8 +172,9 @@ Campos usados:
 - p (preco), q (quantidade), m (trade agressor: True = venda)
 - T (timestamp do trade) ou E (event time)
 
-Esses trades alimentam tres janelas:
-- trades_window: janela principal (WINDOW_TRADES)
+Esses trades alimentam quatro janelas:
+- trades_window: janela curta de entrada (WINDOW_TRADES)
+- hold_trades_window: janela longa de permanencia (HOLD_WINDOW_TRADES)
 - short_trades_window: janela curta (SHORT_WINDOW_TRADES)
 - price_window: janela de precos (PRICE_WINDOW)
 
@@ -178,6 +183,9 @@ O fluxo mede o desequilibrio entre volume comprador e vendedor:
 flow = (buy_volume - sell_volume) / (buy_volume + sell_volume)
 Esse sinal reflete quem esta dominando o book agressor.
 O valor e "clampado" para o intervalo [-1, 1].
+Agora usamos duas janelas:
+- fluxo de entrada (curta) para timing
+- fluxo de permanencia (longa) para sair com menos ruido
 
 Por que funciona:
 quando o volume agressor de compra domina, o preco tende
@@ -187,7 +195,11 @@ a manter pressao de alta no curto prazo, e o inverso para venda.
 Mesmo calculo do fluxo, mas usando short_trades_window.
 Ele captura mudancas rapidas de microestrutura que o fluxo longo pode diluir.
 
-4) Volatilidade
+4) Sinal de fluxo longo (hold)
+Mesmo calculo do fluxo, mas usando hold_trades_window.
+Ele guia a permanencia e a saida para evitar stopar em ruido.
+
+5) Volatilidade
 Calcula-se o desvio padrao dos retornos recentes:
 return[i] = (price[i] - price[i-1]) / price[i-1]
 volatility = std(return)
@@ -196,7 +208,7 @@ Ela entra como fator de reducao de confianca.
 Por que funciona:
 maior volatilidade indica maior ruido, reduzindo confianca na direcao.
 
-5) Momentum
+6) Momentum
 O momentum mede a variacao relativa entre o primeiro e o ultimo preco da janela:
 raw = (last - first) / first
 signal = tanh((raw / (volatility + EPSILON)) * MOMENTUM_SCALE)
@@ -206,7 +218,7 @@ Por que funciona:
 tendencias sustentadas geram retornos consistentes,
 e o tanh evita explodir em regimes extremos.
 
-6) Padroes historicos
+7) Padroes historicos
 Os sinais (flow, short_flow, momentum) sao discretizados:
 bucket = round(signal / PATTERN_BUCKET_STEP)
 pattern_key = (bucket_flow, bucket_short_flow, bucket_momentum)
@@ -230,7 +242,7 @@ Por que funciona:
 padroes validos precisam ser frequentes e atuais,
 evitando vieses de dados muito antigos.
 
-7) Combinacao dos sinais e pesos
+8) Combinacao dos sinais e pesos
 Pesos atuais (WEIGHTS):
 - flow = 0.45
 - short_flow = 0.30
@@ -252,13 +264,13 @@ Por que funciona:
 o peso maior em fluxo privilegia o dado mais atual
 do WebSocket, enquanto a confianca reduz a agressividade em mercados ruidosos.
 
-8) Espacamento do historico de analise
+9) Espacamento do historico de analise
 Para evitar excesso de registros, o intervalo e adaptativo:
 avg_interval = tempo_medio_entre_trades
 analysis_interval = clamp(avg_interval * ANALYSIS_INTERVAL_MULTIPLIER,
                           MIN_ANALYSIS_INTERVAL, MAX_ANALYSIS_INTERVAL)
 
-9) Regras de entrada e saida
+10) Regras de entrada e saida
 Entrada:
 - prob >= ENTRY_THRESHOLD
 
@@ -268,6 +280,7 @@ Saida (mantendo a mao em pullbacks):
   - TREND: prob >= 0.65 (segura)
   - HOLD:  0.45 <= prob < 0.65 (zona de ruido/absorção, não sai)
   - EXIT:  prob < 0.45 (só sai se houver prova)
+- fluxo de permanencia usa janela longa (hold_trades_window)
 - reversão confirmada: precisa de pelo menos 2 sinais:
   - falha em fazer novo high (pullback com momentum <= 0)
   - delta acumulado negativo + agressão compradora fraca
@@ -280,7 +293,7 @@ Saida (mantendo a mao em pullbacks):
 Por que funciona:
 combina risco maximo, deterioracao de fluxo e tempo maximo por trade.
 
-10) Patrimonio e alavancagem
+11) Patrimonio e alavancagem
 O retorno percentual por trade:
 pnl_return = (exit_price - entry_price) / entry_price
 Sem alavancagem:
@@ -485,6 +498,8 @@ def record_analysis_snapshot(now, price, probability, components):
             "pattern": components.get("pattern"),
         },
         "flow_state": components.get("flow_state"),
+        "hold_flow": components.get("hold_flow"),
+        "hold_prob": components.get("hold_prob"),
         "cum_delta_ratio": components.get("cum_delta_ratio"),
         "aggression_ratio": components.get("aggression_ratio"),
         "reversal_count": components.get("reversal_count"),
@@ -641,11 +656,11 @@ def compute_reversal_signals(price, components, cum_delta_ratio, aggression_rati
     signals["absorption_sell"] = absorption_sell
 
     volume_against = False
-    if len(short_trades_window) >= 5 and len(trades_window) >= 5:
+    if len(short_trades_window) >= 5 and len(hold_trades_window) >= 5:
         short_total = short_buy_volume + short_sell_volume
-        long_total = buy_volume + sell_volume
+        long_total = hold_buy_volume + hold_sell_volume
         short_avg = safe_div(short_total, len(short_trades_window), 0.0)
-        long_avg = safe_div(long_total, len(trades_window), 0.0)
+        long_avg = safe_div(long_total, len(hold_trades_window), 0.0)
         if (
             long_avg > 0
             and short_avg >= long_avg * VOLUME_SURGE_MULTIPLIER
@@ -832,10 +847,14 @@ def evaluate_decision(price, timestamp):
 
     with lock:
         prob, components = compute_probability(now)
-        flow_state = get_flow_state(prob)
-        _, _, cum_delta_ratio, aggression_ratio = compute_cum_delta(trades_window, CUM_DELTA_WINDOW)
+        hold_flow_signal = compute_flow_signal(hold_buy_volume, hold_sell_volume)
+        hold_prob = 0.5 + 0.5 * hold_flow_signal if hold_flow_signal is not None else prob
+        flow_state = get_flow_state(hold_prob)
+        _, _, cum_delta_ratio, aggression_ratio = compute_cum_delta(hold_trades_window, CUM_DELTA_WINDOW)
 
         components["flow_state"] = flow_state
+        components["hold_flow"] = hold_flow_signal
+        components["hold_prob"] = hold_prob
         components["cum_delta_ratio"] = cum_delta_ratio
         components["aggression_ratio"] = aggression_ratio
         components["reversal_count"] = 0
@@ -962,6 +981,10 @@ def evaluate_decision(price, timestamp):
                     "exit_prob": prob,
                     "entry_flow_state": entry_components.get("flow_state"),
                     "exit_flow_state": flow_state,
+                    "entry_hold_flow": entry_components.get("hold_flow"),
+                    "exit_hold_flow": hold_flow_signal,
+                    "entry_hold_prob": entry_components.get("hold_prob"),
+                    "exit_hold_prob": hold_prob,
                     "exit_cum_delta_ratio": cum_delta_ratio,
                     "exit_aggression_ratio": aggression_ratio,
                     "exit_reversal_count": reversal_count,
@@ -1049,6 +1072,8 @@ def print_status():
         aggression_ratio = last_components.get("aggression_ratio") if last_components else None
         reversal_count = last_components.get("reversal_count") if last_components else None
         reversal_required = last_components.get("reversal_required") if last_components else None
+        hold_flow = last_components.get("hold_flow") if last_components else None
+        hold_prob = last_components.get("hold_prob") if last_components else None
         history_count = len(trade_history)
         analysis_count = len(analysis_history)
         analysis_interval = compute_analysis_interval()
@@ -1064,6 +1089,7 @@ STATE: {state} | FLOW: {flow_state if flow_state else "n/a"} | PRICE: {last_pric
 {section}
 PROB: {last_probability:.2f} | CONF: {format_float(confidence, 2)} | VOL: {format_float(volatility, 5)}
 REV: {reversal_count if reversal_count is not None else "n/a"}/{reversal_required if reversal_required is not None else "n/a"} | CΔ: {format_signal(cum_delta_ratio)} | AGR: {format_float(aggression_ratio, 2)}
+HOLD: FLOW={format_signal(hold_flow)} PROB={format_float(hold_prob, 2)}
 SIGNALS: FLOW={format_signal(last_components.get("flow") if last_components else None)} SHORT={format_signal(last_components.get("short_flow") if last_components else None)} MOM={format_signal(last_components.get("momentum") if last_components else None)} PAT={format_signal(last_components.get("pattern") if last_components else None)}
 PATTERN: {pattern_key if pattern_key is not None else "n/a"} | WR: {format_float(pattern_win_rate, 2)}
 {section}
@@ -1164,6 +1190,7 @@ def menu_loop():
 def on_message(ws, message):
     global buy_volume, sell_volume, last_price
     global short_buy_volume, short_sell_volume
+    global hold_buy_volume, hold_sell_volume
 
     data = json.loads(message)
     price = float(data["p"])
@@ -1197,16 +1224,26 @@ def on_message(ws, message):
             else:
                 short_sell_volume -= old_short["qty"]
 
+        if len(hold_trades_window) == hold_trades_window.maxlen:
+            old_hold = hold_trades_window.popleft()
+            if old_hold["side"] == "buy":
+                hold_buy_volume -= old_hold["qty"]
+            else:
+                hold_sell_volume -= old_hold["qty"]
+
         side = "sell" if is_sell else "buy"
         trades_window.append({"side": side, "qty": qty, "ts": timestamp})
         short_trades_window.append({"side": side, "qty": qty, "ts": timestamp})
+        hold_trades_window.append({"side": side, "qty": qty, "ts": timestamp})
 
         if side == "buy":
             buy_volume += qty
             short_buy_volume += qty
+            hold_buy_volume += qty
         else:
             sell_volume += qty
             short_sell_volume += qty
+            hold_sell_volume += qty
 
     evaluate_decision(price, timestamp)
 

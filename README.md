@@ -20,6 +20,7 @@ O **BotTrader** é um sistema de trading automatizado para criptomoedas que oper
 **Quais condições?** O sistema trabalha com **3 estados de fluxo** e **só sai com prova de reversão**, não no primeiro tick contra.
 
 1. **Estados de Fluxo (TREND / HOLD / EXIT)**
+   - Calculados a partir do **fluxo de permanência (janela longa)**
    - **TREND:** prob ≥ 65% → segura
    - **HOLD:** 45% ≤ prob < 65% → mantém a mão (zona de ruído/absorção)
    - **EXIT:** prob < 45% → só sai se houver prova
@@ -45,6 +46,7 @@ O **BotTrader** é um sistema de trading automatizado para criptomoedas que oper
 **Cálculo da Probabilidade:** A probabilidade é recalculada continuamente através da função `compute_probability()`, que:
 - Calcula o sinal de flow: `flow = (buy_volume - sell_volume) / (buy_volume + sell_volume)`
 - Calcula o sinal de short_flow: mesmo cálculo, mas com janela de 80 trades
+- Usa **fluxo de permanência (janela longa)** para segurar posição e sair com menos ruído
 - Calcula o momentum: `momentum = tanh((price_change / volatility) × 3.0)`
 - Consulta padrões históricos similares
 - Combina tudo com pesos: `raw_signal = (flow×0.45 + short_flow×0.30 + momentum×0.15 + pattern×0.10)`
@@ -69,7 +71,7 @@ O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 
 ### **Análise em Tempo Real**
 - Conecta diretamente ao WebSocket da Binance
-- Analisa **500 trades recentes** para calcular fluxo de ordens
+- Analisa **200 trades recentes** para entrada e **800 trades** para permanência
 - Usa **janela curta de 80 trades** para detectar mudanças rápidas
 - Considera **momentum de preço** nos últimos 30 períodos
 - Consulta **padrões históricos** de situações similares
@@ -157,7 +159,8 @@ O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 - **Símbolo:** BTC/USDT Futuros USDⓈ-M (configurável)
 - **Tipo de Ordem:** Taker (market orders)
 - **Taxas:** 0.04% por operação (0.08% total por trade: entrada + saída)
-- **Janela Principal:** 500 trades
+- **Janela de Entrada:** 200 trades
+- **Janela de Permanência (Exit):** 800 trades
 - **Janela Curta:** 80 trades
 - **Janela de Preços:** 200 períodos
 - **Alavancagem:** 3x (configurável)
