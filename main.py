@@ -31,6 +31,8 @@ CUM_DELTA_WINDOW = 120
 CUM_DELTA_EXIT_THRESHOLD = -0.12
 AGGRESSION_RATIO_EXIT = 0.45
 REVERSAL_MIN_SIGNALS = 2
+REVERSAL_MIN_SIGNALS_STRICT = 3
+MIN_EXIT_PROFIT_PCT = MIN_PROFIT_POTENTIAL  # evita sair com lucro menor que taxas
 
 # Falha estrutural e absorção
 FAIL_HIGH_PCT = 0.0015
@@ -271,6 +273,8 @@ Saida (mantendo a mao em pullbacks):
   - delta acumulado negativo + agressão compradora fraca
   - absorção no lado vendedor (volume alto, preço parado)
   - volume contra o preço (surto de volume vendedor)
+- buffer de lucro: se o lucro for menor que as taxas (MIN_EXIT_PROFIT_PCT),
+  exige 3 sinais de reversão para evitar sair com ganho residual
 - stop por tempo: só é usado quando o fluxo está em EXIT
 
 Por que funciona:
@@ -484,6 +488,7 @@ def record_analysis_snapshot(now, price, probability, components):
         "cum_delta_ratio": components.get("cum_delta_ratio"),
         "aggression_ratio": components.get("aggression_ratio"),
         "reversal_count": components.get("reversal_count"),
+        "reversal_required": components.get("reversal_required"),
         "pattern_key": serialize_pattern_key(components.get("pattern_key")),
         "pattern_win_rate": components.get("pattern_win_rate"),
         "analysis_interval": interval,
@@ -885,6 +890,10 @@ def evaluate_decision(price, timestamp):
             if peak_price is None or price > peak_price:
                 peak_price = price
 
+            required_signals = REVERSAL_MIN_SIGNALS
+            if pnl_return > 0 and pnl_return < MIN_EXIT_PROFIT_PCT:
+                required_signals = REVERSAL_MIN_SIGNALS_STRICT
+
             reversal_signals = compute_reversal_signals(
                 price,
                 components,
@@ -893,9 +902,10 @@ def evaluate_decision(price, timestamp):
                 peak_price,
             )
             reversal_count = sum(1 for active in reversal_signals.values() if active)
-            reversal_confirmed = reversal_count >= REVERSAL_MIN_SIGNALS
+            reversal_confirmed = reversal_count >= required_signals
             components["reversal_count"] = reversal_count
             components["reversal_signals"] = reversal_signals
+            components["reversal_required"] = required_signals
             components["peak_price"] = peak_price
 
             stop_financeiro = pnl_return <= -MAX_LOSS_PCT
@@ -955,6 +965,7 @@ def evaluate_decision(price, timestamp):
                     "exit_cum_delta_ratio": cum_delta_ratio,
                     "exit_aggression_ratio": aggression_ratio,
                     "exit_reversal_count": reversal_count,
+                    "exit_reversal_required": required_signals,
                     "exit_reversal_signals": reversal_flags,
                     "peak_price": peak_price,
                     "entry_equity": entry_equity,
@@ -1037,6 +1048,7 @@ def print_status():
         cum_delta_ratio = last_components.get("cum_delta_ratio") if last_components else None
         aggression_ratio = last_components.get("aggression_ratio") if last_components else None
         reversal_count = last_components.get("reversal_count") if last_components else None
+        reversal_required = last_components.get("reversal_required") if last_components else None
         history_count = len(trade_history)
         analysis_count = len(analysis_history)
         analysis_interval = compute_analysis_interval()
@@ -1051,7 +1063,7 @@ BOTTRADER STATUS
 STATE: {state} | FLOW: {flow_state if flow_state else "n/a"} | PRICE: {last_price:.2f}
 {section}
 PROB: {last_probability:.2f} | CONF: {format_float(confidence, 2)} | VOL: {format_float(volatility, 5)}
-REV: {reversal_count if reversal_count is not None else "n/a"} | CΔ: {format_signal(cum_delta_ratio)} | AGR: {format_float(aggression_ratio, 2)}
+REV: {reversal_count if reversal_count is not None else "n/a"}/{reversal_required if reversal_required is not None else "n/a"} | CΔ: {format_signal(cum_delta_ratio)} | AGR: {format_float(aggression_ratio, 2)}
 SIGNALS: FLOW={format_signal(last_components.get("flow") if last_components else None)} SHORT={format_signal(last_components.get("short_flow") if last_components else None)} MOM={format_signal(last_components.get("momentum") if last_components else None)} PAT={format_signal(last_components.get("pattern") if last_components else None)}
 PATTERN: {pattern_key if pattern_key is not None else "n/a"} | WR: {format_float(pattern_win_rate, 2)}
 {section}
