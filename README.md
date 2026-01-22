@@ -30,8 +30,8 @@ O **BotTrader** é um sistema de trading automatizado para criptomoedas que oper
    - Delta acumulado negativo + agressão compradora fraca
    - Absorção no lado vendedor (volume alto com preço travado)
    - Volume crescendo contra o preço
-   - **Buffer de lucro:** se o lucro for menor que as taxas (~0.08%),
-     exige 3 sinais de reversão para evitar saídas com ganho residual
+   - **Persistência:** fluxo em EXIT por N leituras consecutivas (default 3)
+   - **Profit lock zone:** antes de ~0.12%, fluxo não manda; só stop técnico
 
 3. **FLOW_STOP_THRESHOLD (35%)** - Quando a probabilidade cai para 35% ou menos **e** a reversão está confirmada, o sistema sai como sinal forte de mudança de fluxo.
 
@@ -63,7 +63,8 @@ O **BotTrader** é um sistema de trading automatizado para criptomoedas que oper
 O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 - **Stop Financeiro (MAX_LOSS_PCT):** Perda de -0.2% (protege capital)
 - **Reversão Confirmada:** Pelo menos 2 sinais de reversão com fluxo fora de TREND
-- **Buffer de lucro:** se o lucro for menor que as taxas (~0.08%), exige 3 sinais
+- **Profit lock zone:** antes de ~0.12%, não sai por fluxo (só stop financeiro/falha estrutural)
+- **Persistência contra:** fluxo em EXIT por 3 leituras consecutivas
 - **Stop por Fluxo (FLOW_STOP_THRESHOLD):** Probabilidade cai para ≤ 35% **e** reversão confirmada (sinal forte)
 - **Stop por Tempo (MAX_TRADE_TIME):** Trade dura mais de 60 segundos **e** fluxo está em EXIT
 

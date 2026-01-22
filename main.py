@@ -41,6 +41,9 @@ ABSORPTION_STALL_PCT = 0.0003
 ABSORPTION_FLOW_THRESHOLD = 0.25
 VOLUME_SURGE_MULTIPLIER = 1.4
 VOLUME_FLOW_THRESHOLD = 0.2
+MIN_PROFIT_LOCK_PCT = 0.0012
+EXIT_FLOW_CONFIRMATION = 3
+MIN_EXIT_PROFIT_PCT = MIN_PROFIT_LOCK_PCT
 
 MAX_LOSS_PCT = 0.002
 MAX_TRADE_TIME = 60
@@ -55,7 +58,6 @@ MIN_PRICE = 1.0  # Preço mínimo válido (proteção contra dados zerados)
 BINANCE_FEE_RATE = 0.0004  # 0.04% por operação (taker)
 SLIPPAGE_RATE = 0.0  # Takers não têm slippage significativo (ordens market)
 MIN_PROFIT_POTENTIAL = 0.0008  # 0.08% mínimo de potencial de lucro para compensar taxas (entrada + saída)
-MIN_EXIT_PROFIT_PCT = MIN_PROFIT_POTENTIAL  # evita sair com lucro menor que taxas
 
 PATTERN_MIN_TRADES = 8
 PATTERN_BUCKET_STEP = 0.2
@@ -119,6 +121,8 @@ state = "FORA"
 entry_price = None
 entry_time = None
 peak_price = None
+flow_exit_streak = 0
+delta_against_streak = 0
 
 buy_volume = 0.0
 sell_volume = 0.0
@@ -281,13 +285,14 @@ Saida (mantendo a mao em pullbacks):
   - HOLD:  0.45 <= prob < 0.65 (zona de ruido/absorção, não sai)
   - EXIT:  prob < 0.45 (só sai se houver prova)
 - fluxo de permanencia usa janela longa (hold_trades_window)
+- profit lock zone: antes de MIN_PROFIT_LOCK_PCT, fluxo não manda;
+  só sai se houver falha estrutural ou stop financeiro
+- persistencia contra: flow_state precisa ficar em EXIT por N janelas
 - reversão confirmada: precisa de pelo menos 2 sinais:
   - falha em fazer novo high (pullback com momentum <= 0)
   - delta acumulado negativo + agressão compradora fraca
   - absorção no lado vendedor (volume alto, preço parado)
   - volume contra o preço (surto de volume vendedor)
-- buffer de lucro: se o lucro for menor que as taxas (MIN_EXIT_PROFIT_PCT),
-  exige 3 sinais de reversão para evitar sair com ganho residual
 - stop por tempo: só é usado quando o fluxo está em EXIT
 
 Por que funciona:
@@ -504,6 +509,11 @@ def record_analysis_snapshot(now, price, probability, components):
         "aggression_ratio": components.get("aggression_ratio"),
         "reversal_count": components.get("reversal_count"),
         "reversal_required": components.get("reversal_required"),
+        "profit_lock_active": components.get("profit_lock_active"),
+        "flow_exit_streak": components.get("flow_exit_streak"),
+        "delta_against_streak": components.get("delta_against_streak"),
+        "flow_exit_confirmed": components.get("flow_exit_confirmed"),
+        "structural_failure": components.get("structural_failure"),
         "pattern_key": serialize_pattern_key(components.get("pattern_key")),
         "pattern_win_rate": components.get("pattern_win_rate"),
         "analysis_interval": interval,
@@ -831,6 +841,7 @@ def format_float(value, precision=4):
 
 def evaluate_decision(price, timestamp):
     global state, entry_price, entry_time, peak_price
+    global flow_exit_streak, delta_against_streak
     global total_pnl, wins, losses
     global equity, equity_leveraged
     global total_pnl_leveraged
@@ -876,6 +887,8 @@ def evaluate_decision(price, timestamp):
                 entry_price = price
                 entry_time = now
                 peak_price = price
+                flow_exit_streak = 0
+                delta_against_streak = 0
                 entry_snapshot = {
                     "prob": prob,
                     "components": dict(components),
@@ -889,6 +902,8 @@ def evaluate_decision(price, timestamp):
                 state = "FORA"
                 entry_snapshot = None
                 peak_price = None
+                flow_exit_streak = 0
+                delta_against_streak = 0
                 return
 
             # Proteção contra preços inválidos durante o trade
@@ -909,6 +924,8 @@ def evaluate_decision(price, timestamp):
             if peak_price is None or price > peak_price:
                 peak_price = price
 
+            profit_lock_active = pnl_return > 0 and pnl_return < MIN_PROFIT_LOCK_PCT
+
             required_signals = REVERSAL_MIN_SIGNALS
             if pnl_return > 0 and pnl_return < MIN_EXIT_PROFIT_PCT:
                 required_signals = REVERSAL_MIN_SIGNALS_STRICT
@@ -926,11 +943,47 @@ def evaluate_decision(price, timestamp):
             components["reversal_signals"] = reversal_signals
             components["reversal_required"] = required_signals
             components["peak_price"] = peak_price
+            components["profit_lock_active"] = profit_lock_active
+
+            if flow_state == "EXIT":
+                flow_exit_streak += 1
+            else:
+                flow_exit_streak = 0
+
+            if reversal_signals.get("delta_against"):
+                delta_against_streak += 1
+            else:
+                delta_against_streak = 0
+
+            flow_exit_confirmed = flow_exit_streak >= EXIT_FLOW_CONFIRMATION
+            delta_persisted = delta_against_streak >= EXIT_FLOW_CONFIRMATION
+            structural_failure = (
+                reversal_signals.get("failed_high")
+                and delta_persisted
+                and (reversal_signals.get("volume_against") or reversal_signals.get("absorption_sell"))
+            )
+            components["flow_exit_streak"] = flow_exit_streak
+            components["delta_against_streak"] = delta_against_streak
+            components["flow_exit_confirmed"] = flow_exit_confirmed
+            components["structural_failure"] = structural_failure
 
             stop_financeiro = pnl_return <= -MAX_LOSS_PCT
-            stop_fluxo = prob <= FLOW_STOP_THRESHOLD and reversal_confirmed
-            stop_tempo = trade_duration >= MAX_TRADE_TIME and flow_state == "EXIT"
-            exit_reversao = reversal_confirmed and flow_state != "TREND"
+            stop_fluxo = (
+                prob <= FLOW_STOP_THRESHOLD
+                and reversal_confirmed
+                and flow_exit_confirmed
+                and not profit_lock_active
+            )
+            stop_tempo = (
+                trade_duration >= MAX_TRADE_TIME
+                and flow_state == "EXIT"
+                and flow_exit_confirmed
+                and not profit_lock_active
+            )
+            exit_reversao = (
+                (reversal_confirmed and flow_exit_confirmed and not profit_lock_active)
+                or structural_failure
+            )
 
             if stop_financeiro or stop_fluxo or stop_tempo or exit_reversao:
                 entry_equity = entry_snapshot.get("equity") if entry_snapshot else equity
@@ -963,6 +1016,14 @@ def evaluate_decision(price, timestamp):
 
                 entry_components = entry_snapshot["components"] if entry_snapshot else {}
                 reversal_flags = [name for name, active in reversal_signals.items() if active]
+                exit_reason = (
+                    "STOP_FINANCEIRO" if stop_financeiro else
+                    "FALHA_ESTRUTURAL" if structural_failure else
+                    "STOP_FLUXO" if stop_fluxo else
+                    "STOP_TEMPO" if stop_tempo else
+                    "REVERSAO_CONFIRMADA" if exit_reversao else
+                    "EXIT_PROB"
+                )
                 trade_entry = {
                     "symbol": SYMBOL,
                     "app_version": APP_VERSION,
@@ -990,6 +1051,11 @@ def evaluate_decision(price, timestamp):
                     "exit_reversal_count": reversal_count,
                     "exit_reversal_required": required_signals,
                     "exit_reversal_signals": reversal_flags,
+                    "exit_flow_streak": flow_exit_streak,
+                    "exit_delta_streak": delta_against_streak,
+                    "exit_flow_confirmed": flow_exit_confirmed,
+                    "exit_structural_failure": structural_failure,
+                    "exit_profit_lock_active": profit_lock_active,
                     "peak_price": peak_price,
                     "entry_equity": entry_equity,
                     "exit_equity": equity,
@@ -1016,13 +1082,7 @@ def evaluate_decision(price, timestamp):
                     "analysis_interval": compute_analysis_interval(),
                     "time_bucket": get_time_bucket(entry_time),
                     "exit_time_bucket": get_time_bucket(now),
-                    "exit_reason": (
-                        "STOP_FINANCEIRO" if stop_financeiro else
-                        "STOP_FLUXO" if stop_fluxo else
-                        "STOP_TEMPO" if stop_tempo else
-                        "REVERSAO_CONFIRMADA" if exit_reversao else
-                        "EXIT_PROB"
-                    ),
+                    "exit_reason": exit_reason,
                     "buy_volume": buy_volume,
                     "sell_volume": sell_volume,
                     "short_buy_volume": short_buy_volume,
@@ -1074,6 +1134,8 @@ def print_status():
         reversal_required = last_components.get("reversal_required") if last_components else None
         hold_flow = last_components.get("hold_flow") if last_components else None
         hold_prob = last_components.get("hold_prob") if last_components else None
+        profit_lock_active = last_components.get("profit_lock_active") if last_components else None
+        flow_exit_streak = last_components.get("flow_exit_streak") if last_components else None
         history_count = len(trade_history)
         analysis_count = len(analysis_history)
         analysis_interval = compute_analysis_interval()
@@ -1089,6 +1151,7 @@ STATE: {state} | FLOW: {flow_state if flow_state else "n/a"} | PRICE: {last_pric
 {section}
 PROB: {last_probability:.2f} | CONF: {format_float(confidence, 2)} | VOL: {format_float(volatility, 5)}
 REV: {reversal_count if reversal_count is not None else "n/a"}/{reversal_required if reversal_required is not None else "n/a"} | CΔ: {format_signal(cum_delta_ratio)} | AGR: {format_float(aggression_ratio, 2)}
+LOCK: {"ON" if profit_lock_active else "OFF"} | EXIT STREAK: {flow_exit_streak if flow_exit_streak is not None else "n/a"}
 HOLD: FLOW={format_signal(hold_flow)} PROB={format_float(hold_prob, 2)}
 SIGNALS: FLOW={format_signal(last_components.get("flow") if last_components else None)} SHORT={format_signal(last_components.get("short_flow") if last_components else None)} MOM={format_signal(last_components.get("momentum") if last_components else None)} PAT={format_signal(last_components.get("pattern") if last_components else None)}
 PATTERN: {pattern_key if pattern_key is not None else "n/a"} | WR: {format_float(pattern_win_rate, 2)}
