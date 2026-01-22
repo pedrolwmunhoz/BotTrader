@@ -11,8 +11,8 @@ import websocket
 APP_VERSION = "0.4.0"
 
 SYMBOL = "btcusdt"  # BTC/USDT Futuros USDⓈ-M
-WINDOW_TRADES = 200  # janela curta para entrada
-HOLD_WINDOW_TRADES = 800  # janela longa para permanência/saída
+WINDOW_TRADES = 500  # janela de entrada
+HOLD_WINDOW_TRADES = 1500  # janela longa para permanência/saída
 SHORT_WINDOW_TRADES = 80
 PRICE_WINDOW = 200
 MIN_LOOKBACK = 50
@@ -173,7 +173,7 @@ Campos usados:
 - T (timestamp do trade) ou E (event time)
 
 Esses trades alimentam quatro janelas:
-- trades_window: janela curta de entrada (WINDOW_TRADES)
+- trades_window: janela de entrada (WINDOW_TRADES)
 - hold_trades_window: janela longa de permanencia (HOLD_WINDOW_TRADES)
 - short_trades_window: janela curta (SHORT_WINDOW_TRADES)
 - price_window: janela de precos (PRICE_WINDOW)

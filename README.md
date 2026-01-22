@@ -71,7 +71,7 @@ O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 
 ### **Análise em Tempo Real**
 - Conecta diretamente ao WebSocket da Binance
-- Analisa **200 trades recentes** para entrada e **800 trades** para permanência
+- Analisa **500 trades recentes** para entrada e **1500 trades** para permanência
 - Usa **janela curta de 80 trades** para detectar mudanças rápidas
 - Considera **momentum de preço** nos últimos 30 períodos
 - Consulta **padrões históricos** de situações similares
@@ -159,8 +159,8 @@ O bot sai automaticamente quando qualquer uma dessas condições é atendida:
 - **Símbolo:** BTC/USDT Futuros USDⓈ-M (configurável)
 - **Tipo de Ordem:** Taker (market orders)
 - **Taxas:** 0.04% por operação (0.08% total por trade: entrada + saída)
-- **Janela de Entrada:** 200 trades
-- **Janela de Permanência (Exit):** 800 trades
+- **Janela de Entrada:** 500 trades
+- **Janela de Permanência (Exit):** 1500 trades
 - **Janela Curta:** 80 trades
 - **Janela de Preços:** 200 períodos
 - **Alavancagem:** 3x (configurável)
