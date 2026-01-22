@@ -32,7 +32,6 @@ CUM_DELTA_EXIT_THRESHOLD = -0.12
 AGGRESSION_RATIO_EXIT = 0.45
 REVERSAL_MIN_SIGNALS = 2
 REVERSAL_MIN_SIGNALS_STRICT = 3
-MIN_EXIT_PROFIT_PCT = MIN_PROFIT_POTENTIAL  # evita sair com lucro menor que taxas
 
 # Falha estrutural e absorção
 FAIL_HIGH_PCT = 0.0015
@@ -55,6 +54,7 @@ MIN_PRICE = 1.0  # Preço mínimo válido (proteção contra dados zerados)
 BINANCE_FEE_RATE = 0.0004  # 0.04% por operação (taker)
 SLIPPAGE_RATE = 0.0  # Takers não têm slippage significativo (ordens market)
 MIN_PROFIT_POTENTIAL = 0.0008  # 0.08% mínimo de potencial de lucro para compensar taxas (entrada + saída)
+MIN_EXIT_PROFIT_PCT = MIN_PROFIT_POTENTIAL  # evita sair com lucro menor que taxas
 
 PATTERN_MIN_TRADES = 8
 PATTERN_BUCKET_STEP = 0.2
